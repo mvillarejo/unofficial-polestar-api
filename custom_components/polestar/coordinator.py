@@ -23,6 +23,8 @@ from polestar_api.models.charging import (
     BatteryChargeTimer,
     ChargeTargetLevelSettingType,
     ChargeTimerResponse,
+    DailyTime,
+    TimeZoneOffset,
     TargetSocResponse,
 )
 from polestar_api.models.climate import ClimatizationInfo
@@ -43,7 +45,7 @@ from polestar_api.models.precleaning import PreCleaningInfo
 from polestar_api.models.weather import WeatherReport
 
 from .const import CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL, STREAM_MAX_RETRIES, STREAM_RETRY_DELAY
-from .utils import local_utc_offset_minutes, time_to_minutes
+from .utils import local_utc_offset_minutes
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -570,15 +572,21 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
         activated: bool | None = None,
     ) -> ChargeTimerResponse:
         """Set the global charge timer while preserving unspecified fields."""
-        current_timer = BatteryChargeTimer(timezone_offset=local_utc_offset_minutes())
+        def _daily(t: dt_time) -> DailyTime:
+            return DailyTime(
+                hour=t.hour,
+                minute=t.minute,
+                time_zone=TimeZoneOffset(offset_minutes=local_utc_offset_minutes()),
+            )
+
+        current_timer = BatteryChargeTimer()
         if self.data and self.data.charge_timer and self.data.charge_timer.timer:
             current_timer = self.data.charge_timer.timer
 
         timer = BatteryChargeTimer(
-            start=current_timer.start if start is None else time_to_minutes(start),
-            stop=current_timer.stop if stop is None else time_to_minutes(stop),
+            start=current_timer.start if start is None else _daily(start),
+            stop=current_timer.stop if stop is None else _daily(stop),
             activated=current_timer.activated if activated is None else activated,
-            timezone_offset=local_utc_offset_minutes(),
         )
         response = await self.vehicle.set_charge_timer(timer)
         if not self._command_succeeded(response):

@@ -14,7 +14,6 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .const import DOMAIN
 from .coordinator import PolestarCoordinator
 from .entity import PolestarEntity
-from .utils import minutes_to_time
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -80,7 +79,10 @@ class PolestarChargeTimerTime(PolestarEntity, TimeEntity):
         if not self.available:
             return None
         timer = self.coordinator.data.charge_timer.timer
-        return minutes_to_time(getattr(timer, self.entity_description.value_attr))
+        daily = getattr(timer, self.entity_description.value_attr)
+        if daily is None:
+            return None
+        return dt_time(hour=daily.hour, minute=daily.minute)
 
     async def async_set_value(self, value: dt_time) -> None:
         kwargs = {"start": value} if self.entity_description.value_attr == "start" else {"stop": value}

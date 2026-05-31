@@ -27,6 +27,7 @@ from polestar_api.models.charging import (
     BatteryChargeTimer,
     ChargeTargetLevelSettingType,
     ChargeTimerResponse,
+    DailyTime,
     TargetSocResponse,
 )
 from polestar_api.models.climate import (
@@ -104,7 +105,11 @@ class DemoVehicle:
         self._target_soc = 80
         self._target_soc_setting_type = ChargeTargetLevelSettingType.DAILY
         self._amp_limit = 16
-        self._charge_timer = BatteryChargeTimer(start=1320, stop=360, activated=False, timezone_offset=60)
+        self._charge_timer = BatteryChargeTimer(
+            start=DailyTime(hour=22, minute=0),
+            stop=DailyTime(hour=6, minute=0),
+            activated=False,
+        )
         self._charge_locations = [
             ChargeLocation(
                 location_id="home",

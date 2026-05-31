@@ -11,7 +11,10 @@ Requires [HACS](https://hacs.xyz/) installed on your Home Assistant instance.
 3. Click **Add**, then find **Unofficial Polestar** in HACS and click **Download**
 4. Restart Home Assistant
 
-Then add the integration via **Settings → Devices & Services → Add Integration → Polestar**. Enter your Polestar ID email, password, and VIN (Vehicle Identification Number). Each config entry sets up one vehicle — add the integration again with a different VIN if you have multiple cars. Tick **Demo mode** to get a fake vehicle with static data (no API connection needed).
+Then add the integration via **Settings → Devices & Services → Add Integration → Polestar**. Enter your Polestar ID email and password — the integration discovers the cars on your account and lets you **pick your vehicle from a list** and set the polling interval. Each config entry sets up one vehicle — to add more than one car, add the integration again and pick the other vehicle.
+
+- **Secondary / guest accounts** (no vehicles listed): choose **"My vehicle is not listed"** and enter the VIN (Vehicle Identification Number) manually.
+- **Demo mode:** tick **Demo mode** on the first step and enter any VIN to get a fake vehicle with static data (no API connection needed).
 
 ## Entities
 

@@ -48,7 +48,9 @@ from polestar_api.models.charging import (
     StopResumeChargingCommand,
     StopResumeChargingRequest,
     TargetSocResponse,
+    TimeZoneOffset,
 )
+from polestar_api.models.charging import DailyTime as ChargeTimerDailyTime
 from polestar_api.models.climatization import (
     ClimatizationResponse,
     ClimatizationStartRequest,
@@ -87,7 +89,7 @@ from polestar_api.models.charge_location import (
     ChargeLocation,
     ChargeLocationTimer,
     ChargeLocationDepartureTime,
-    LocationType,
+    ChargeLocationType,
     OptimisedChargingType,
 )
 
@@ -348,32 +350,49 @@ class TestAmpLimit:
 class TestChargeTimer:
     def test_timer_round_trip(self):
         timer = BatteryChargeTimer(
-            start=1200, stop=1800, activated=True, timezone_offset=60,
+            start=ChargeTimerDailyTime(
+                hour=20, minute=0, time_zone=TimeZoneOffset(offset_minutes=60),
+            ),
+            stop=ChargeTimerDailyTime(
+                hour=6, minute=30, time_zone=TimeZoneOffset(offset_minutes=60),
+            ),
+            activated=True,
         )
         data = timer.to_bytes()
         restored = BatteryChargeTimer.from_bytes(data)
-        assert restored.start == 1200
-        assert restored.stop == 1800
+        assert restored.start.hour == 20
+        assert restored.start.minute == 0
+        assert restored.start.time_zone.offset_minutes == 60
+        assert restored.stop.hour == 6
+        assert restored.stop.minute == 30
         assert restored.activated is True
-        assert restored.timezone_offset == 60
 
     def test_set_request_nested(self):
-        timer = BatteryChargeTimer(start=600, stop=1200, activated=True)
+        timer = BatteryChargeTimer(
+            start=ChargeTimerDailyTime(hour=10, minute=0),
+            stop=ChargeTimerDailyTime(hour=20, minute=0),
+            activated=True,
+        )
         req = SetChargeTimerRequest(timer=timer)
         data = req.to_bytes()
         restored = SetChargeTimerRequest.from_bytes(data)
-        assert restored.timer.start == 600
+        assert restored.timer.start.hour == 10
         assert restored.timer.activated is True
 
     def test_response_nested(self):
-        timer = BatteryChargeTimer(start=600, stop=1200, activated=False)
+        timer = BatteryChargeTimer(
+            start=ChargeTimerDailyTime(hour=10, minute=0),
+            stop=ChargeTimerDailyTime(hour=20, minute=0),
+            activated=False,
+        )
         resp = ChargeTimerResponse(
             response_status=ResponseStatus(status_code=0),
             timer=timer,
         )
         data = resp.to_bytes()
         restored = ChargeTimerResponse.from_bytes(data)
-        assert restored.timer.stop == 1200
+        assert restored.timer.stop.hour == 20
+        assert restored.timer.stop.minute == 0
 
 
 class TestChargeNow:
@@ -624,12 +643,12 @@ class TestChargeLocation:
             longitude=18.0686,
             amp_limit=16,
             minimum_soc=20,
-            location_type=LocationType.SAVED,
+            location_type=ChargeLocationType.SAVED,
             available_optimised_charging=OptimisedChargingType.INTELLIGENT_TIMER,
         )
         assert loc.location_alias == "Home"
         assert loc.amp_limit == 16
-        assert loc.location_type == LocationType.SAVED
+        assert loc.location_type == ChargeLocationType.SAVED
 
     def test_with_timers(self):
         timer = ChargeLocationTimer(

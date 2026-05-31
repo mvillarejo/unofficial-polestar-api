@@ -60,16 +60,30 @@ class AmpLimitResponse(ProtoMessage, schema={
 
 
 @dataclass(frozen=True)
+class TimeZoneOffset(ProtoMessage, schema={1: "offset_minutes"}):
+    """chronos common.v1.TimeZone — UTC offset in minutes."""
+    offset_minutes: int = 0
+
+
+@dataclass(frozen=True)
+class DailyTime(ProtoMessage, schema={1: "hour", 2: "minute", 3: "time_zone"}):
+    """chronos common.v1.DailyTime — a wall-clock time with timezone."""
+    hour: int = 0
+    minute: int = 0
+    time_zone: TimeZoneOffset | None = None
+
+
+@dataclass(frozen=True)
 class BatteryChargeTimer(ProtoMessage, schema={
     1: "start",
     2: "stop",
     3: "activated",
-    4: "timezone_offset",
 }):
-    start: int = 0
-    stop: int = 0
+    # v2 globalchargetimer.GlobalChargeTimer: start/stop are DailyTime messages
+    # (field 4 is server-side metadata, not sent here).
+    start: DailyTime | None = None
+    stop: DailyTime | None = None
     activated: bool = False
-    timezone_offset: int = 0
 
 
 @dataclass(frozen=True)

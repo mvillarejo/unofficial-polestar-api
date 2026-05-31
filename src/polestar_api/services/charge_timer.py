@@ -8,6 +8,12 @@ from typing import TYPE_CHECKING
 from .. import grpc as grpc_call
 from ..codec import decode, encode, encode_bool, encode_message
 from ..models.charging import BatteryChargeTimer, ChargeTimerResponse
+from ..models.common import (
+    CHRONOS_SUCCESS_STATES,
+    ChronosStatus,
+    ResponseStatus,
+    ResponseStatusCode,
+)
 from .chronos import wrap_chronos
 
 if TYPE_CHECKING:
@@ -27,12 +33,32 @@ class ChargeTimerServiceClient:
 
     @staticmethod
     def _parse(data: bytes) -> ChargeTimerResponse:
-        """Unwrap chronos envelope and parse the charge timer payload."""
+        """Parse GetGlobalChargeTimerResponse — timer is at field 1 (not enveloped)."""
         raw = decode(data)
-        payload = raw.get(3)
+        payload = raw.get(1)  # globalChargeTimer
         if isinstance(payload, bytes):
-            return ChargeTimerResponse.from_bytes(payload)
+            return ChargeTimerResponse(timer=BatteryChargeTimer.from_bytes(payload))
         return ChargeTimerResponse()
+
+    @staticmethod
+    def _parse_set(data: bytes) -> ChargeTimerResponse:
+        """Parse the flat SetGlobalChargeTimerResponse {1: id, 2: status, ...}.
+
+        status (field 2) is the chronos delivery lifecycle enum (same as SetTargetSoc).
+        """
+        raw = decode(data)
+        status_code = raw.get(2, 0)
+        try:
+            chronos_status = ChronosStatus(status_code)
+        except ValueError:
+            chronos_status = ChronosStatus.UNKNOWN_ERROR
+        succeeded = chronos_status in CHRONOS_SUCCESS_STATES
+        return ChargeTimerResponse(
+            response_status=ResponseStatus(
+                status=ResponseStatusCode.SUCCESS if succeeded else ResponseStatusCode.ERROR,
+                status_code=status_code,
+            ),
+        )
 
     async def get(self) -> ChargeTimerResponse:
         metadata = await self._connection.get_metadata(self._vin)
@@ -64,4 +90,4 @@ class ChargeTimerServiceClient:
             wrap_chronos(self._vin, payload),
             metadata=metadata,
         )
-        return self._parse(data)
+        return self._parse_set(data)

@@ -115,7 +115,6 @@ _FETCH_ATTRS: tuple[tuple[str, str], ...] = (
     ("health", "get_health"),
     ("availability", "get_availability"),
     ("connectivity", "get_connectivity"),
-    ("odometer", "get_odometer"),
     ("precleaning", "get_precleaning"),
     ("weather", "get_weather"),
     ("software", "get_software_info"),
@@ -151,7 +150,6 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
         )
         self.vehicle = vehicle
         self.climate_preferences = ClimateCommandPreferences()
-        self.target_soc_setting_type = ChargeTargetLevelSettingType.DAILY
         self._installed_version_cache: str | None = None
         self._stream_tasks: dict[str, asyncio.Task[None]] = {}
 
@@ -313,6 +311,7 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
             "climate": "stream_climate",
             "exterior": "stream_exterior",
             "precleaning": "stream_precleaning",
+            "odometer": "stream_odometer",
         }
         for attr, method_name in streams.items():
             method = getattr(self.vehicle, method_name, None)
@@ -440,11 +439,51 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
         self._schedule_background_refresh("climate")
         return response
 
+    @property
+    def target_soc_setting_type(self) -> ChargeTargetLevelSettingType | None:
+        """The car's currently active target SoC mode, or None if unknown."""
+        if self.data is None or self.data.target_soc is None:
+            return None
+        setting_type = self.data.target_soc.setting_type
+        if setting_type == ChargeTargetLevelSettingType.UNSPECIFIED:
+            return None
+        return setting_type
+
     async def async_set_target_soc(self, level: int) -> TargetSocResponse:
-        """Set target SoC using the selected setting type."""
+        """Set the target SoC level, keeping the car's current mode.
+
+        Never switches mode implicitly — in DAILY/LONG_TRIP the car ignores the
+        level and keeps its preset, so this won't override the app's config.
+        Use async_set_target_soc_mode to switch mode explicitly.
+        """
+        mode = self.target_soc_setting_type or ChargeTargetLevelSettingType.CUSTOM
+        if mode != ChargeTargetLevelSettingType.CUSTOM:
+            # The car ignores a custom level in daily/long-trip mode (it charges to
+            # a fixed preset). Tell the user instead of silently snapping back.
+            raise HomeAssistantError(
+                f"Target SoC is in {mode.name.lower().replace('_', ' ')} mode, which "
+                "charges to a fixed preset and ignores a specific level. Set the "
+                "'Target SOC mode' select to Custom to choose a specific level."
+            )
         response = await self.async_run_command(
-            lambda: self.vehicle.set_target_soc(level, self.target_soc_setting_type),
+            lambda: self.vehicle.set_target_soc(level, mode),
             error_message="Set target SOC command failed",
+        )
+        self._schedule_background_refresh("target_soc")
+        return response
+
+    async def async_set_target_soc_mode(
+        self, mode: ChargeTargetLevelSettingType
+    ) -> TargetSocResponse:
+        """Explicitly switch the car's target SoC mode (daily/long_trip/custom)."""
+        level = (
+            self.data.target_soc.target_level
+            if self.data and self.data.target_soc
+            else 0
+        )
+        response = await self.async_run_command(
+            lambda: self.vehicle.set_target_soc(level, mode),
+            error_message="Set target SOC mode command failed",
         )
         self._schedule_background_refresh("target_soc")
         return response

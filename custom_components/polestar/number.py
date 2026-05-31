@@ -17,6 +17,7 @@ from homeassistant.helpers.restore_state import RestoreEntity
 from .const import DOMAIN
 from .coordinator import PolestarCoordinator, PolestarVehicleData
 from .entity import PolestarEntity
+from polestar_api.models.charging import ChargeTargetLevelSettingType
 from polestar_api.models.parking_climate_timer import ParkingClimateTimerSettings
 
 
@@ -111,6 +112,16 @@ class PolestarNumber(PolestarEntity, RestoreEntity, NumberEntity):
 
         if self.entity_description.key == "climate_target_temperature":
             self.coordinator.climate_preferences.target_temperature = restored
+
+    @property
+    def available(self) -> bool:
+        if self.entity_description.key == "target_soc":
+            # The slider only sets a value in CUSTOM mode; lock it otherwise.
+            # The Target SOC sensor still shows the active target value.
+            mode = self.coordinator.target_soc_setting_type
+            if mode is not None and mode != ChargeTargetLevelSettingType.CUSTOM:
+                return False
+        return super().available
 
     @property
     def native_value(self) -> float | None:

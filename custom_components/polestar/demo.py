@@ -370,6 +370,7 @@ class DemoVehicle:
         return TargetSocResponse(
             response_status=ResponseStatus(status=ResponseStatusCode.SUCCESS),
             target_level=self._target_soc,
+            setting_type=self._target_soc_setting_type,
         )
 
     async def get_amp_limit(self) -> AmpLimitResponse:

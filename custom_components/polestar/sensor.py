@@ -115,6 +115,15 @@ SENSORS: tuple[PolestarSensorDescription, ...] = (
         value_fn=lambda d: d.battery.range_km if d.battery else None,
     ),
     PolestarSensorDescription(
+        key="target_soc",
+        name="Target SOC",
+        icon="mdi:battery-charging-high",
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=PERCENTAGE,
+        value_fn=lambda d: d.target_soc.target_level if d.target_soc else None,
+        attrs_fn=lambda d: {"mode": enum_name(d.target_soc.setting_type)} if d.target_soc else {},
+    ),
+    PolestarSensorDescription(
         key="charging_power",
         name="Charging power",
         device_class=SensorDeviceClass.POWER,

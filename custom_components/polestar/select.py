@@ -164,6 +164,10 @@ class PolestarSelect(PolestarEntity, RestoreEntity, SelectEntity):
     async def async_added_to_hass(self) -> None:
         """Restore helper state."""
         await super().async_added_to_hass()
+        # target_soc mode reflects the car's live state — don't restore/replay it
+        # (replaying would issue a SetTargetSoc on every startup).
+        if self.entity_description.key == "target_soc_setting_type":
+            return
         last_state = await self.async_get_last_state()
         if last_state is None or last_state.state in {"unknown", "unavailable"}:
             return
@@ -171,10 +175,11 @@ class PolestarSelect(PolestarEntity, RestoreEntity, SelectEntity):
             await self.async_select_option(last_state.state)
 
     @property
-    def current_option(self) -> str:
+    def current_option(self) -> str | None:
         key = self.entity_description.key
         if key == "target_soc_setting_type":
-            return self.coordinator.target_soc_setting_type.name.lower()
+            mode = self.coordinator.target_soc_setting_type
+            return mode.name.lower() if mode is not None else None
 
         prefs = self.coordinator.climate_preferences
         if key == "climate_front_left_seat":
@@ -190,7 +195,8 @@ class PolestarSelect(PolestarEntity, RestoreEntity, SelectEntity):
     async def async_select_option(self, option: str) -> None:
         key = self.entity_description.key
         if key == "target_soc_setting_type":
-            self.coordinator.target_soc_setting_type = _TARGET_SOC_MAP[option]
+            # Explicit, deliberate mode switch — tells the car to change mode now.
+            await self.coordinator.async_set_target_soc_mode(_TARGET_SOC_MAP[option])
             self.async_write_ha_state()
             return
 

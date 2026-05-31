@@ -14,6 +14,12 @@ from ..models.charging import (
     ChargeTargetLevelSettingType,
     TargetSocResponse,
 )
+from ..models.common import (
+    CHRONOS_SUCCESS_STATES,
+    ChronosStatus,
+    ResponseStatus,
+    ResponseStatusCode,
+)
 from .chronos import wrap_chronos
 
 if TYPE_CHECKING:
@@ -33,12 +39,20 @@ class TargetSocServiceClient:
 
     @staticmethod
     def _parse(data: bytes) -> TargetSocResponse:
-        """Unwrap chronos envelope and parse the target SoC payload."""
+        """Parse a GetTargetSoc response (targetSoc message at field 3)."""
         raw = decode(data)
         payload = raw.get(3)
         if isinstance(payload, bytes):
+            # inner targetSoc: {1: batteryChargeTargetLevel, 2: settingType, ...}
             inner = decode(payload)
-            return TargetSocResponse(target_level=int(inner.get(1, 0) or 0))
+            try:
+                setting_type = ChargeTargetLevelSettingType(inner.get(2, 0) or 0)
+            except ValueError:
+                setting_type = ChargeTargetLevelSettingType.UNSPECIFIED
+            return TargetSocResponse(
+                target_level=int(inner.get(1, 0) or 0),
+                setting_type=setting_type,
+            )
         return TargetSocResponse()
 
     async def get(self) -> TargetSocResponse:
@@ -75,7 +89,23 @@ class TargetSocServiceClient:
             self._connection.channel, f"{self._svc}/SetTargetSoc",
             wrap_chronos(self._vin, payload), metadata=metadata,
         )
-        _LOGGER.debug("SetTargetSoc raw response (%d bytes): %s", len(data), data.hex())
         raw = decode(data)
-        _LOGGER.debug("SetTargetSoc decoded fields: %s", {k: v.hex() if isinstance(v, bytes) else v for k, v in raw.items()})
-        return self._parse(data)
+        # SetTargetSocResponse is flat: {1: id, 2: vin, 3: status (chronos
+        # delivery lifecycle), 4: message}. Field 3 is NOT our 4-value
+        # ResponseStatusCode — it's the SENT/DELIVERED/SYNCED lifecycle.
+        status_code = raw.get(3, 0)
+        try:
+            chronos_status = ChronosStatus(status_code)
+        except ValueError:
+            chronos_status = ChronosStatus.UNKNOWN_ERROR
+        succeeded = chronos_status in CHRONOS_SUCCESS_STATES
+        _LOGGER.debug(
+            "SetTargetSoc response: status=%d (%s) -> %s",
+            status_code, chronos_status.name, "ok" if succeeded else "failed",
+        )
+        return TargetSocResponse(
+            response_status=ResponseStatus(
+                status=ResponseStatusCode.SUCCESS if succeeded else ResponseStatusCode.ERROR,
+                status_code=status_code,
+            ),
+        )

@@ -27,6 +27,37 @@ class ResponseStatusCode(IntEnum):
     ERROR = 3
 
 
+class ChronosStatus(IntEnum):
+    """Command delivery lifecycle (chronos.proto.messages.common.v1.Status).
+
+    Chronos command responses (e.g. SetTargetSoc) report where the command is
+    in the SENT -> DELIVERED -> SYNCED pipeline, not a simple success/error.
+    The exact value seen depends on car state/timing at response time.
+    """
+
+    UNKNOWN_ERROR = 0
+    SENT = 1
+    DELIVERED = 2
+    SUCCESS = 3
+    SYNCED = 4
+    CAR_OFFLINE = 5
+    CAR_ERROR = 6
+    ERROR = 7
+    REPLACED = 8
+
+
+# Lifecycle states that mean the command was accepted/applied (not an error).
+CHRONOS_SUCCESS_STATES = frozenset(
+    {
+        ChronosStatus.SENT,
+        ChronosStatus.DELIVERED,
+        ChronosStatus.SUCCESS,
+        ChronosStatus.SYNCED,
+        ChronosStatus.REPLACED,
+    }
+)
+
+
 @dataclass(frozen=True)
 class ResponseStatusDetail(ProtoMessage, schema={1: "name", 2: "value"}):
     name: str = ""

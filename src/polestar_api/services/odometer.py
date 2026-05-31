@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, AsyncIterator
 
 from .. import grpc as grpc_call
 from ..codec import decode, encode
@@ -19,6 +19,13 @@ _STREAM_TIMEOUT = 10.0
 def _odometer_request(vin: str) -> bytes:
     """Encode an odometer request (VIN at field 2, per DT proto)."""
     return encode({"vin": (2, "string")}, {"vin": vin})
+
+
+def _parse(data: bytes) -> OdometerStatus | None:
+    raw = decode(data, _RESPONSE_SCHEMA)
+    if raw.get("odometer"):
+        return OdometerStatus.from_bytes(raw["odometer"])
+    return None
 
 
 class OdometerServiceClient:
@@ -48,7 +55,17 @@ class OdometerServiceClient:
             pass
         if data is None:
             return None
-        raw = decode(data, _RESPONSE_SCHEMA)
-        if raw.get("odometer"):
-            return OdometerStatus.from_bytes(raw["odometer"])
-        return None
+        return _parse(data)
+
+    async def stream(self) -> AsyncIterator[OdometerStatus]:
+        """Stream odometer updates (long-lived subscription)."""
+        metadata = await self._connection.get_metadata(self._vin)
+        async for data in grpc_call.unary_stream(
+            self._connection.channel,
+            f"{self._svc}/GetOdometer",
+            _odometer_request(self._vin),
+            metadata=metadata,
+        ):
+            status = _parse(data)
+            if status is not None:
+                yield status

@@ -217,6 +217,11 @@ class Vehicle:
         """Odometer (meters, converted to km via property), trip meters, and timestamp, or ``None`` if unavailable."""
         return await self._odometer.get_latest()
 
+    async def stream_odometer(self) -> AsyncIterator[OdometerStatus]:
+        """Real-time odometer updates."""
+        async for status in self._odometer.stream():
+            yield status
+
     # -- Charging --
 
     async def get_target_soc(self) -> TargetSocResponse:

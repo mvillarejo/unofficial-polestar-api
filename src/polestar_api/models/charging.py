@@ -35,6 +35,8 @@ class TargetSocResponse(ProtoMessage, schema={
 }):
     response_status: ResponseStatus | None = None
     target_level: int = 0
+    # The car's active mode, populated from GetTargetSoc (not on the wire here).
+    setting_type: ChargeTargetLevelSettingType = ChargeTargetLevelSettingType.UNSPECIFIED
 
 
 # -- Amp Limit --

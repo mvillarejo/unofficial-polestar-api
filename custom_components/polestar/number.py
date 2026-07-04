@@ -63,7 +63,11 @@ NUMBERS: tuple[PolestarNumberDescription, ...] = (
         native_min_value=0,
         native_max_value=30,
         native_step=0.5,
-        value_fn=lambda c: c.climate_preferences.target_temperature,
+        value_fn=lambda c: (
+            c.data.climate.target_temperature_celsius
+            if c.data and c.data.climate and c.data.climate.target_temperature_celsius is not None
+            else c.climate_preferences.target_temperature
+        ),
         set_fn=lambda c, val: None,
         restore_state=True,
     ),

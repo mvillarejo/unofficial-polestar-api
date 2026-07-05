@@ -260,7 +260,7 @@ SENSORS: tuple[PolestarSensorDescription, ...] = (
         device_class=SensorDeviceClass.DISTANCE,
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfLength.KILOMETERS,
-        value_fn=lambda d: (d.dashboard.dashboard_data.trip_meter_auto_km if d.dashboard and d.dashboard.dashboard_data else None) or (d.odometer.trip_meter_automatic_km if d.odometer and d.odometer.trip_meter_automatic_km else None),
+        value_fn=lambda d: (d.dashboard.dashboard_data.trip_meter_auto_km if d.dashboard and d.dashboard.dashboard_data else None) or (d.odometer.trip_meter_automatic_km if d.odometer and d.odometer.trip_meter_automatic_km is not None else None),
     ),
     PolestarSensorDescription(
         key="heading",
@@ -328,8 +328,8 @@ SENSORS: tuple[PolestarSensorDescription, ...] = (
         name="Washer fluid warning",
         device_class=SensorDeviceClass.ENUM,
         entity_category=EntityCategory.DIAGNOSTIC,
-        options=enum_options(WasherFluidLevelWarning),
-        value_fn=lambda d: enum_name(d.health.washer_fluid_level_warning) if d.health else None,
+        options=enum_options(WasherFluidLevelWarning, exclude_unspecified=False),
+        value_fn=lambda d: enum_name(d.health.washer_fluid_level_warning, allow_unspecified=True) if d.health else None,
     ),
     PolestarSensorDescription(
         key="low_voltage_battery_warning",

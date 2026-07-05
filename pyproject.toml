@@ -8,6 +8,8 @@ version = "0.4.0"
 description = "Unofficial async Python client for Polestar vehicle APIs"
 readme = "README.md"
 license = "MIT"
+authors = [{ name = "kildahldev" }]
+maintainers = [{ name = "Manuel Villarejo", email = "mjvillarejo@gmail.com" }]
 requires-python = ">=3.12"
 keywords = ["polestar", "ev", "car", "api", "grpc", "home-assistant"]
 classifiers = [
@@ -26,8 +28,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/kildahldev/unofficial-polestar-api"
-Issues = "https://github.com/kildahldev/unofficial-polestar-api/issues"
+Homepage = "https://github.com/mvillarejo/unofficial-polestar-api"
+Issues = "https://github.com/mvillarejo/unofficial-polestar-api/issues"
+Upstream = "https://github.com/kildahldev/unofficial-polestar-api"
 
 [project.optional-dependencies]
 dev = [

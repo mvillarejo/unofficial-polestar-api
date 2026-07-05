@@ -2,6 +2,12 @@
 
 # unofficial-polestar-api
 
+> **Fork notice:** this is a fork of [kildahldev/unofficial-polestar-api](https://github.com/kildahldev/unofficial-polestar-api),
+> maintained by [Manuel Villarejo](https://github.com/mvillarejo). Fixes and features developed here that are
+> generally useful are intended to be upstreamed via pull request when ready; in the meantime this fork
+> tracks its own releases and the HA integration installs the library directly from here (see `manifest.json`)
+> rather than from PyPI, since only the upstream project can publish under the shared package name.
+
 Unofficial async Python client and Home Assistant integration for Polestar gRPC APIs.
 
 This project aims to bring you as much control as possible over your car. It uses the same APIs as the official mobile app and exposes most functionality.

@@ -156,6 +156,7 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
         self._installed_version_cache: str | None = None
         self._stream_tasks: dict[str, asyncio.Task[None]] = {}
         self._unsupported_streams: set[str] = set()
+        self._unsupported_commands: set[str] = set()
 
     @staticmethod
     def _command_succeeded(response: Any) -> bool:
@@ -205,15 +206,29 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
         *,
         error_message: str = "Command failed",
         timeout: int = 30,
+        capability: str | None = None,
     ) -> Any:
-        """Run a remote command and validate its response."""
+        """Run a remote command and validate its response.
+
+        If *capability* is set and the server returns FAILED_PRECONDITION or
+        UNIMPLEMENTED, the capability is marked as unsupported so entities can
+        become unavailable instead of repeatedly failing.
+        """
         try:
             response = await asyncio.wait_for(command(), timeout=timeout)
         except TimeoutError:
             raise HomeAssistantError(f"{error_message} (timed out after {timeout}s)")
+        except GRPCError as err:
+            if capability and err.status in (GrpcStatus.UNIMPLEMENTED, GrpcStatus.FAILED_PRECONDITION):
+                self._unsupported_commands.add(capability)
+            raise HomeAssistantError(self._command_error_message(err, error_message))
         if not self._command_succeeded(response):
             raise HomeAssistantError(self._command_error_message(response, error_message))
         return response
+
+    def is_command_supported(self, capability: str) -> bool:
+        """Return whether a command capability is supported by the car."""
+        return capability not in self._unsupported_commands
 
     def _schedule_background_refresh(self, *attrs: str) -> None:
         """Kick off a background refresh for the given attributes."""
@@ -286,6 +301,7 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
 
         data = PolestarVehicleData(**values)
         self._update_installed_version_cache(data.software)
+        self._unsupported_commands.clear()
         self._restart_dead_streams()
         return data
 
@@ -560,6 +576,7 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
         response = await self.async_run_command(
             self.vehicle.open_windows,
             error_message="Open windows command failed",
+            capability="open_windows",
         )
         self._schedule_background_refresh("exterior")
         return response
@@ -569,6 +586,7 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
         response = await self.async_run_command(
             self.vehicle.close_windows,
             error_message="Close windows command failed",
+            capability="close_windows",
         )
         self._schedule_background_refresh("exterior")
         return response
@@ -578,6 +596,7 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
         response = await self.async_run_command(
             self.vehicle.unlock_trunk,
             error_message="Unlock trunk command failed",
+            capability="unlock_trunk",
         )
         self._schedule_background_refresh("exterior")
         return response

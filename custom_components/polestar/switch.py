@@ -24,6 +24,7 @@ class PolestarSwitchDescription(SwitchEntityDescription):
     is_on_fn: Callable[[PolestarVehicleData], bool | None]
     turn_on_fn: Callable[[PolestarCoordinator], Awaitable[Any]]
     turn_off_fn: Callable[[PolestarCoordinator], Awaitable[Any]]
+    capability: str | None = None
 
 
 SWITCHES: tuple[PolestarSwitchDescription, ...] = (
@@ -34,6 +35,7 @@ SWITCHES: tuple[PolestarSwitchDescription, ...] = (
         is_on_fn=lambda d: d.climate.is_active if d.climate else None,
         turn_on_fn=lambda c: c.async_start_climate(),
         turn_off_fn=lambda c: c.async_stop_climate(),
+        capability="climate",
     ),
     PolestarSwitchDescription(
         key="precleaning",
@@ -42,6 +44,7 @@ SWITCHES: tuple[PolestarSwitchDescription, ...] = (
         is_on_fn=lambda d: d.precleaning.is_running if d.precleaning else None,
         turn_on_fn=lambda c: c.async_start_precleaning(),
         turn_off_fn=lambda c: c.async_stop_precleaning(),
+        capability="precleaning",
     ),
     PolestarSwitchDescription(
         key="charging",
@@ -50,6 +53,7 @@ SWITCHES: tuple[PolestarSwitchDescription, ...] = (
         is_on_fn=lambda d: d.battery.is_charging if d.battery else None,
         turn_on_fn=lambda c: c.async_start_charging(),
         turn_off_fn=lambda c: c.async_stop_charging(),
+        capability="charging",
     ),
     PolestarSwitchDescription(
         key="charge_timer",
@@ -59,6 +63,7 @@ SWITCHES: tuple[PolestarSwitchDescription, ...] = (
         is_on_fn=lambda d: d.charge_timer.timer.activated if d.charge_timer and d.charge_timer.timer else None,
         turn_on_fn=lambda c: c.async_set_charge_timer(activated=True),
         turn_off_fn=lambda c: c.async_set_charge_timer(activated=False),
+        capability="charge_timer",
     ),
 )
 
@@ -86,6 +91,14 @@ class PolestarSwitch(PolestarEntity, SwitchEntity):
         super().__init__(coordinator)
         self.entity_description = description
         self._attr_unique_id = f"{self._vehicle.vin}_{description.key}"
+
+    @property
+    def available(self) -> bool:
+        """Return False if the car doesn't support this command."""
+        cap = self.entity_description.capability
+        if cap and not self.coordinator.is_command_supported(cap):
+            return False
+        return super().available
 
     @property
     def is_on(self) -> bool | None:

@@ -64,8 +64,62 @@ break.
 - Tests use `pytest-asyncio` with `asyncio_mode = "auto"` — no `@pytest.mark.asyncio` decorator needed.
 - `tests/conftest.py` provides mock fixtures for OIDC config, token responses,
   and vehicle list responses.
-- There is no live API integration test — don't add one without explicit
-  approval, it would require real Polestar credentials.
+- **The default run is offline.** `pyproject.toml` sets `addopts = "-m 'not live'"`.
+  `tests/test_live_integration.py` talks to the real car and some of its write
+  tests prompt on stdin — never run it unattended. Opt in with
+  `uv run pytest tests/test_live_integration.py -m live -s`, and never run its
+  `TestLiveWriteCommands` without asking the user first.
+- `custom_components/` is **not importable** in this repo's test env
+  (`homeassistant` isn't a dev dependency), so the HA integration has no unit
+  tests. Verify coordinator/entity changes by reasoning plus a scratchpad script,
+  not by adding a test harness.
+- Known live failure, not a regression: `test_get_charge_locations` returns
+  `UNIMPLEMENTED: CHARGE_LOCATION` on Polestar 4.
+- Don't add new live tests without explicit approval — they need real
+  credentials and a real car.
+
+## Debugging a wrong sensor value
+
+Reverse-engineered field numbers are the usual culprit, and guessing wastes far
+more time than dumping the wire format. The fast path:
+
+1. **Check live HA state _and history_.** A wrong value and a *frozen* value look
+   identical in a single state read. Credentials live in
+   `~/.config/homeassistant/config.env` (`HA_URL`, `HA_TOKEN`); query with
+   `bash ~/.claude/skills/home-assistant/scripts/ha-entity-status.sh <entity_id>`
+   and pull history from `$HA_URL/api/history/period/<iso-start>?filter_entity_id=<id>`.
+   Compare a suspect sensor against a known-good one — if a whole group froze at
+   the same timestamp it's a coordinator problem, not a parsing problem.
+2. **Dump the raw protobuf.** Real credentials are in the repo's `.env`
+   (`POLESTAR_EMAIL` / `POLESTAR_PASSWORD`). Write a scratchpad script that calls
+   the endpoint via `grpc_call.unary_unary` and walks the result with
+   `codec.decode`, recursing into nested `bytes`. Compare *every* field against
+   what the parser actually reads.
+3. **Gotcha — SSL on macOS + Python 3.14.** The default context finds no CA
+   bundle. Inject certifi contexts *before* first use, exactly as the
+   `configure_ssl` fixture in `tests/test_live_integration.py` does:
+   `auth._HTTPX_SSL_CONTEXT`, `discovery._SSL_CONTEXT`, and
+   `connection._SSL_CONTEXT` (the last needs `set_alpn_protocols(["h2"])`).
+4. **Timestamps are nested `google.protobuf.Timestamp`** messages — field 1
+   seconds, field 2 nanos — not scalars. Several "constant" fields turned out to
+   be config values whose live counterpart had to be derived from these.
+5. If you put captured bytes in a test fixture, **strip the VIN-bearing
+   envelope** — this repo is public. Use the inner message only.
+
+## Releasing
+
+`manifest.json` pins the library to an exact git tag, so the version bump and the
+tag must agree or HACS installs the wrong code.
+
+1. Bump `version` in `pyproject.toml`.
+2. Bump **both** `version` and the `@vX.Y.Z` pin inside `requirements` in
+   `custom_components/polestar/manifest.json`.
+3. `uv lock` if the lockfile records the version.
+4. Commit as `Release X.Y.Z` with a body explaining what users actually get.
+5. Tag `vX.Y.Z` and push the tag.
+6. Publish a GitHub Release for the tag — `release-ha.yml` fires on
+   `release: published`, zips `custom_components/polestar`, and attaches
+   `polestar.zip`. Don't commit `polestar.zip`; CI builds it.
 
 ## CI
 
@@ -73,7 +127,7 @@ GitHub Actions workflows in `.github/workflows/`:
 - `validate.yml` — HACS action validates the custom component.
 - `hassfest.yml` — HA manifest validation.
 - `docs.yml` — builds mkdocs site.
-- `release-ha-ha.yml` — HA release automation.
+- `release-ha.yml` — HA release automation (see Releasing).
 
 ## Common pitfalls
 

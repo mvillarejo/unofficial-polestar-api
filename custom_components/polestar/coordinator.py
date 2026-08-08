@@ -157,6 +157,8 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
         self._stream_tasks: dict[str, asyncio.Task[None]] = {}
         self._unsupported_streams: set[str] = set()
         self._unsupported_commands: set[str] = set()
+        self._unsupported_fetches: set[str] = set()
+        self._all_fetches_failed: bool = False
 
     @staticmethod
     def _command_succeeded(response: Any) -> bool:
@@ -279,8 +281,19 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
         for attr, result in zip(attr_names, results, strict=True):
             if isinstance(result, (AuthError, TokenExpiredError)):
                 raise ConfigEntryAuthFailed(str(result)) from result
+            if isinstance(result, GRPCError) and result.status is GrpcStatus.UNIMPLEMENTED:
+                if attr not in self._unsupported_fetches:
+                    self._unsupported_fetches.add(attr)
+                    _LOGGER.info("Fetch %s not supported for %s: %s", attr, self.vehicle.vin, result)
+                else:
+                    _LOGGER.debug("Fetch %s not supported for %s: %s", attr, self.vehicle.vin, result)
+                values[attr] = getattr(previous, attr)
+                continue
             if isinstance(result, Exception):
-                _LOGGER.debug("Failed to fetch %s for %s: %s", attr, self.vehicle.vin, result)
+                if attr in self._unsupported_fetches:
+                    _LOGGER.debug("Failed to fetch %s for %s: %s", attr, self.vehicle.vin, result)
+                else:
+                    _LOGGER.warning("Failed to fetch %s for %s: %s", attr, self.vehicle.vin, result)
                 values[attr] = getattr(previous, attr)
                 continue
 
@@ -296,8 +309,25 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
 
         if successful_fetches == 0:
             if self.data is not None:
+                if not self._all_fetches_failed:
+                    self._all_fetches_failed = True
+                    _LOGGER.warning(
+                        "All %d attribute fetches failed for %s; keeping previous data",
+                        len(_FETCH_ATTR_LOOKUP),
+                        self.vehicle.vin,
+                    )
+                else:
+                    _LOGGER.debug(
+                        "All %d attribute fetches failed for %s; keeping previous data",
+                        len(_FETCH_ATTR_LOOKUP),
+                        self.vehicle.vin,
+                    )
                 return self.data
             raise UpdateFailed("All API calls failed")
+
+        if self._all_fetches_failed:
+            self._all_fetches_failed = False
+            _LOGGER.info("Attribute fetches recovered for %s", self.vehicle.vin)
 
         data = PolestarVehicleData(**values)
         self._update_installed_version_cache(data.software)
@@ -319,7 +349,18 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
         data = replace(previous, **values)
         if "software" in values:
             self._update_installed_version_cache(data.software)
-        self.async_set_updated_data(data)
+        self._async_push_partial_update(data)
+
+    def _async_push_partial_update(self, data: PolestarVehicleData) -> None:
+        """Update coordinator data and notify listeners without rearming the poll timer.
+
+        Unlike async_set_updated_data, this must not defer the scheduled full poll:
+        both streams and post-command attr refreshes only ever touch a subset of
+        attributes, so they have no business resetting the interval the real poll
+        relies on.
+        """
+        self.data = data
+        self.async_update_listeners()
 
     _STREAMS: dict[str, str] = {
         "battery": "stream_battery",
@@ -381,7 +422,7 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
                     consecutive_failures = 0
                     current = self.data or PolestarVehicleData()
                     merged_value = self._merge_partial_update(attr, getattr(current, attr), value)
-                    self.async_set_updated_data(replace(current, **{attr: merged_value}))
+                    self._async_push_partial_update(replace(current, **{attr: merged_value}))
             except asyncio.CancelledError:
                 raise
             except (AuthError, TokenExpiredError) as err:

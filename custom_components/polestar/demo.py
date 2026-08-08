@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import math
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 import logging
 import random
 
@@ -282,11 +283,16 @@ class DemoVehicle:
 
     async def get_climate(self) -> ClimatizationInfo:
         if self._climate_on:
+            now = datetime.now(UTC)
             return ClimatizationInfo(
                 running_status=ClimatizationRunningStatus.ACTIVE,
                 request_type=ClimatizationRequestType.NOW_FROM_REMOTE,
                 time_remaining=25,
                 heat_or_cool_action=HeatOrCoolAction.HEATING,
+                duration_minutes=30,
+                start_time=now - timedelta(minutes=5),
+                end_time=now + timedelta(minutes=25),
+                reported_at=now,
             )
         return ClimatizationInfo(
             running_status=ClimatizationRunningStatus.IDLE,

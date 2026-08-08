@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from enum import IntEnum
 
 from ..wire import ProtoMessage
@@ -42,6 +43,14 @@ class HeatOrCoolAction(IntEnum):
     VENTILATION_ONLY = 5
 
 
+ACTIVE_RUNNING_STATUSES = frozenset({
+    ClimatizationRunningStatus.ACTIVE,
+    ClimatizationRunningStatus.ACTIVE_WITH_PRECLEANING,
+    ClimatizationRunningStatus.EXTERNAL_POWER_ONLY,
+    ClimatizationRunningStatus.HEATER_ACTIVE,
+})
+
+
 @dataclass(frozen=True)
 class ClimatizationInfo(ProtoMessage, schema={
     1: "running_status",
@@ -60,12 +69,24 @@ class ClimatizationInfo(ProtoMessage, schema={
     rear_left_seat: HeatingIntensity | None = None
     rear_right_seat: HeatingIntensity | None = None
     steering_wheel: HeatingIntensity | None = None
+    duration_minutes: int | None = None
+    start_time: datetime | None = None
+    end_time: datetime | None = None
+    reported_at: datetime | None = None
 
     @property
     def is_active(self) -> bool:
-        return self.running_status in (
-            ClimatizationRunningStatus.ACTIVE,
-            ClimatizationRunningStatus.ACTIVE_WITH_PRECLEANING,
-            ClimatizationRunningStatus.EXTERNAL_POWER_ONLY,
-            ClimatizationRunningStatus.HEATER_ACTIVE,
-        )
+        return self.running_status in ACTIVE_RUNNING_STATUSES
+
+    def remaining_minutes(self, now: datetime | None = None) -> int | None:
+        """Minutes left before climatization stops, counted down from :attr:`end_time`.
+
+        Returns ``None`` when the backend did not report an end time, and ``0``
+        once the session has elapsed or the car is no longer climatizing.
+        """
+        if self.end_time is None:
+            return None
+        if not self.is_active:
+            return 0
+        reference = now or datetime.now(UTC)
+        return max(0, round((self.end_time - reference).total_seconds() / 60))

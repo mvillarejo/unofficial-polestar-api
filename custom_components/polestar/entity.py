@@ -26,7 +26,7 @@ class OptimisticStateMixin:
     seconds if the backend never confirms it.
     """
 
-    _OPTIMISTIC_TTL = 10.0
+    _OPTIMISTIC_TTL = 30.0
     _optimistic_value: Any = None
     _optimistic_deadline: float = 0.0
 

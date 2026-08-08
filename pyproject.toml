@@ -51,6 +51,7 @@ packages = ["src/polestar_api"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+addopts = "-m 'not live'"
 markers = [
-    "live: marks tests that connect to live Polestar APIs (deselect with '-m \"not live\"')",
+    "live: marks tests that connect to live Polestar APIs (select with '-m live')",
 ]

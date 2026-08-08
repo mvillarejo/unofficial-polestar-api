@@ -56,7 +56,7 @@ if TYPE_CHECKING:
     from polestar_api.vehicle import Vehicle
 
 _LOGGER = logging.getLogger(__name__)
-_POST_COMMAND_REFRESH_DELAYS: tuple[int, ...] = (3, 5)
+_POST_COMMAND_REFRESH_DELAYS: tuple[int, ...] = (3, 5, 10, 15)
 _COMMAND_INVOCATION_SUCCESS = {
     InvocationStatus.SENT,
     InvocationStatus.DELIVERED,
@@ -426,6 +426,14 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
             return None
         if attr == "exterior" and previous is not None:
             return result.merge(previous)
+        if attr == "climate" and previous is not None:
+            # GetLatestParkingClimatization can lag behind the live stream, so a
+            # post-command poll may return a snapshot older than what we already
+            # hold. Applying it makes the switch flip off and back on.
+            new_ts = getattr(result, "reported_at", None)
+            old_ts = getattr(previous, "reported_at", None)
+            if new_ts is not None and old_ts is not None and new_ts < old_ts:
+                return previous
         return result
 
     async def async_refresh_after_command(self, *attrs: str) -> None:

@@ -1,5 +1,10 @@
 """Tests for all domain models — round-trip encode/decode."""
 
+from datetime import UTC, datetime
+
+import pytest
+
+from polestar_api.services.climate import ClimateServiceClient
 from polestar_api.models.exterior import (
     AlarmStatus,
     CentralLockStatus,
@@ -155,6 +160,100 @@ class TestClimatizationInfo:
         assert restored.running_status == ClimatizationRunningStatus.ACTIVE
         assert restored.time_remaining == 15
         assert restored.is_active is True
+
+    def test_remaining_minutes_counts_down_from_end_time(self):
+        now = datetime(2026, 8, 8, 15, 10, tzinfo=UTC)
+        info = ClimatizationInfo(
+            running_status=ClimatizationRunningStatus.ACTIVE,
+            end_time=datetime(2026, 8, 8, 15, 25, tzinfo=UTC),
+        )
+        assert info.remaining_minutes(now) == 15
+        assert info.remaining_minutes(datetime(2026, 8, 8, 15, 24, tzinfo=UTC)) == 1
+
+    def test_remaining_minutes_never_negative(self):
+        info = ClimatizationInfo(
+            running_status=ClimatizationRunningStatus.ACTIVE,
+            end_time=datetime(2026, 8, 8, 15, 25, tzinfo=UTC),
+        )
+        assert info.remaining_minutes(datetime(2026, 8, 8, 16, 0, tzinfo=UTC)) == 0
+
+    def test_remaining_minutes_zero_when_idle(self):
+        info = ClimatizationInfo(
+            running_status=ClimatizationRunningStatus.IDLE,
+            end_time=datetime(2026, 8, 8, 15, 25, tzinfo=UTC),
+        )
+        assert info.remaining_minutes(datetime(2026, 8, 8, 15, 10, tzinfo=UTC)) == 0
+
+    def test_remaining_minutes_none_without_end_time(self):
+        info = ClimatizationInfo(running_status=ClimatizationRunningStatus.ACTIVE)
+        assert info.remaining_minutes() is None
+
+
+class TestDigitalTwinClimateParsing:
+    """Parse a real GetLatestParkingClimatization payload captured from a Polestar 4.
+
+    Field 3 is the configured session length (30), not a countdown — the real
+    remaining time has to be derived from the end timestamp in field 16.
+    """
+
+    # Inner ParkingClimatization message; the VIN-bearing envelope is omitted.
+    PAYLOAD = bytes.fromhex(
+        "0a0c08d28eddd30610c8e7828a011001181e30013d0000dc41450000b841"
+        "48015001580160016801720c089086ddd30610c0bcb1dc0178028201"
+        "0c08cd94ddd30610e8bc8dd102"
+    )
+
+    @pytest.fixture
+    def info(self):
+        return ClimateServiceClient._parse_digital_twin(self.PAYLOAD)
+
+    def test_running_status(self, info):
+        assert info.running_status == ClimatizationRunningStatus.ACTIVE
+        assert info.is_active is True
+
+    def test_request_type(self, info):
+        assert info.request_type == ClimatizationRequestType.NOW_FROM_REMOTE
+
+    def test_temperatures(self, info):
+        assert info.current_temperature_celsius == pytest.approx(27.5)
+        assert info.target_temperature_celsius == pytest.approx(23.0)
+
+    def test_timestamps(self, info):
+        assert info.start_time == datetime(2026, 8, 8, 14, 54, 8, 462184, tzinfo=UTC)
+        assert info.end_time == datetime(2026, 8, 8, 15, 25, 1, 706961, tzinfo=UTC)
+        assert info.reported_at == datetime(2026, 8, 8, 15, 12, 18, 289453, tzinfo=UTC)
+
+    def test_duration_is_field_three(self, info):
+        assert info.duration_minutes == 30
+
+    def test_time_remaining_is_derived_not_field_three(self, info):
+        # end_time - reported_at == 12m43s
+        assert info.time_remaining == 13
+        assert info.time_remaining != info.duration_minutes
+
+    def test_remaining_minutes_tracks_wall_clock(self, info):
+        assert info.remaining_minutes(datetime(2026, 8, 8, 15, 20, tzinfo=UTC)) == 5
+
+    def test_idle_payload_reports_no_remaining_time(self):
+        idle = ClimateServiceClient._parse_digital_twin(
+            _replace_field(self.PAYLOAD, running_status=2)
+        )
+        assert idle.running_status == ClimatizationRunningStatus.IDLE
+        assert idle.is_active is False
+        assert idle.time_remaining == 0
+
+    def test_missing_timestamps_degrade_to_zero(self):
+        stripped = ClimateServiceClient._parse_digital_twin(b"\x10\x01\x18\x1e")
+        assert stripped.running_status == ClimatizationRunningStatus.ACTIVE
+        assert stripped.duration_minutes == 30
+        assert stripped.end_time is None
+        assert stripped.time_remaining == 0
+        assert stripped.remaining_minutes() is None
+
+
+def _replace_field(payload: bytes, *, running_status: int) -> bytes:
+    """Rewrite field 2 (running status) of an encoded ParkingClimatization message."""
+    return payload.replace(b"\x10\x01", bytes([0x10, running_status]), 1)
 
 
 # -- Connectivity --

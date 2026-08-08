@@ -73,6 +73,14 @@ def _heating_intensity_name(value: HeatingIntensity | None) -> str | None:
     return value.name.lower()
 
 
+def _climate_time_remaining(data: PolestarVehicleData) -> int | None:
+    """Count down from the reported end time so the value keeps ticking between updates."""
+    if data.climate is None:
+        return None
+    remaining = data.climate.remaining_minutes()
+    return data.climate.time_remaining if remaining is None else remaining
+
+
 def _current_charge_location_state(data: PolestarVehicleData) -> str | None:
     location_id = data.current_charge_location.get("location_id")
     if not location_id:
@@ -461,7 +469,22 @@ SENSORS: tuple[PolestarSensorDescription, ...] = (
         device_class=SensorDeviceClass.DURATION,
         native_unit_of_measurement=UnitOfTime.MINUTES,
         entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda d: d.climate.time_remaining if d.climate else None,
+        value_fn=lambda d: _climate_time_remaining(d),
+    ),
+    PolestarSensorDescription(
+        key="climate_end_time",
+        name="Climate end time",
+        device_class=SensorDeviceClass.TIMESTAMP,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda d: d.climate.end_time if d.climate and d.climate.is_active else None,
+    ),
+    PolestarSensorDescription(
+        key="climate_duration",
+        name="Climate duration",
+        device_class=SensorDeviceClass.DURATION,
+        native_unit_of_measurement=UnitOfTime.MINUTES,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda d: d.climate.duration_minutes if d.climate else None,
     ),
     PolestarSensorDescription(
         key="climate_current_temperature",

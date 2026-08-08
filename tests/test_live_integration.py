@@ -240,12 +240,25 @@ class TestLiveClimate:
             assert isinstance(climate.running_status, ClimatizationRunningStatus)
             print(f"  Running: {climate.running_status.name}, active: {climate.is_active}")
             print(f"  Request type: {climate.request_type.name}")
-            print(f"  Time remaining: {climate.time_remaining}s")
+            print(f"  Time remaining: {climate.time_remaining} min")
             print(f"  Action: {climate.heat_or_cool_action.name}")
             if climate.current_temperature_celsius is not None:
                 print(f"  Current temp: {climate.current_temperature_celsius}°C")
             if climate.target_temperature_celsius is not None:
                 print(f"  Target temp: {climate.target_temperature_celsius}°C")
+            if climate.duration_minutes is not None:
+                print(f"  Duration: {climate.duration_minutes} min")
+            if climate.start_time is not None:
+                print(f"  Started: {climate.start_time.isoformat()}")
+            if climate.end_time is not None:
+                print(f"  Ends: {climate.end_time.isoformat()}")
+                print(f"  Remaining now: {climate.remaining_minutes()} min")
+
+            if climate.is_active:
+                assert climate.end_time is not None, (
+                    "an active session must report an end time to count down from"
+                )
+                assert climate.time_remaining > 0
 
 
 class TestLiveOdometer:

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from .. import grpc as grpc_call
 from ..codec import decode
 from ..models.climate import (
+    ACTIVE_RUNNING_STATUSES,
     ClimatizationInfo,
     ClimatizationRequestType,
     ClimatizationRunningStatus,
@@ -62,6 +64,25 @@ class ClimateServiceClient:
             return None
 
     @staticmethod
+    def _parse_timestamp(value: object) -> datetime | None:
+        """Decode a nested google.protobuf.Timestamp into an aware datetime."""
+        if not isinstance(value, bytes):
+            return None
+        try:
+            fields = decode(value)
+        except Exception:  # noqa: BLE001
+            return None
+        seconds = fields.get(1)
+        if not isinstance(seconds, int):
+            return None
+        nanos = fields.get(2)
+        micros = nanos // 1000 if isinstance(nanos, int) else 0
+        try:
+            return datetime.fromtimestamp(seconds, UTC).replace(microsecond=micros)
+        except (OverflowError, OSError, ValueError):
+            return None
+
+    @staticmethod
     def _infer_heat_or_cool_action(raw: dict) -> HeatOrCoolAction:
         if raw.get(6):
             return HeatOrCoolAction.VENTILATION_ONLY
@@ -76,15 +97,43 @@ class ClimateServiceClient:
             return HeatOrCoolAction.COOLING
         return HeatOrCoolAction.NOT_REQUIRED
 
+    @staticmethod
+    def _remaining_at_report(
+        running_status: ClimatizationRunningStatus,
+        end_time: datetime | None,
+        reported_at: datetime | None,
+    ) -> int:
+        """Minutes left as of the car's own report timestamp.
+
+        Field 3 of the digital twin message is the configured session length
+        (always 30), not a countdown — the countdown has to be derived from the
+        end timestamp.
+        """
+        if end_time is None or reported_at is None:
+            return 0
+        if running_status not in ACTIVE_RUNNING_STATUSES:
+            return 0
+        return max(0, round((end_time - reported_at).total_seconds() / 60))
+
     @classmethod
     def _parse_digital_twin(cls, climate_bytes: bytes) -> ClimatizationInfo:
         raw = decode(climate_bytes)
         current_temp = raw.get(7)
         target_temp = raw.get(8)
+        running_status = cls._map_running_status(raw.get(2))
+        reported_at = cls._parse_timestamp(raw.get(1))
+        start_time = cls._parse_timestamp(raw.get(14))
+        end_time = cls._parse_timestamp(raw.get(16))
         return ClimatizationInfo(
-            running_status=cls._map_running_status(raw.get(2)),
+            running_status=running_status,
             request_type=cls._map_request_type(raw.get(15)),
-            time_remaining=int(raw.get(3, 0) or 0),
+            time_remaining=cls._remaining_at_report(
+                running_status, end_time, reported_at
+            ),
+            duration_minutes=int(raw.get(3, 0) or 0) or None,
+            start_time=start_time,
+            end_time=end_time,
+            reported_at=reported_at,
             heat_or_cool_action=cls._infer_heat_or_cool_action(raw),
             current_temperature_celsius=float(current_temp) if isinstance(current_temp, (int, float)) else None,
             target_temperature_celsius=float(target_temp) if isinstance(target_temp, (int, float)) else None,

@@ -10,3 +10,4 @@ build/
 .env
 get_token.py
 debug_grpc.py
+polestar.zip

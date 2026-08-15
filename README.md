@@ -61,10 +61,10 @@ type: vertical-stack
 cards:
   - type: custom:mushroom-title-card
     title: Polestar 4
-    subtitle: '{{ states(''sensor.polestar_VIN_battery_level'')|int }}% · {{
+    subtitle: '{{ states(''sensor.polestar_VIN_battery_level'')|int(0) }}% · {{
       states(''sensor.polestar_VIN_range'') }} km · {{ states(''sensor.polestar_VIN_outside_temperature'')
       }}°C exterior · Clima {{ ''encendido'' if is_state(''switch.polestar_VIN_climate'',''on'')
-      else ''apagado'' }} ({{ states(''number.polestar_VIN_climate_target_temperature'')|int
+      else ''apagado'' }} ({{ states(''number.polestar_VIN_climate_target_temperature'')|int(0)
       }}°C objetivo)'
   - type: grid
     columns: 4

@@ -3,12 +3,14 @@
     "step": {
       "init": {
         "data": {
-          "update_interval": "Polling interval (seconds)"
+          "update_interval": "Base polling interval (seconds)",
+          "enable_streams": "Enable live updates (experimental)"
         },
         "data_description": {
-          "update_interval": "How often to poll the Polestar cloud for the data that is not pushed live (60-86400 seconds)."
+          "update_interval": "How often to poll the fastest-changing data — battery, climate and doors/windows (60-1800 seconds). Location and the odometer are polled 3x less often, status and charging settings 8x, and software and schedules 30x.",
+          "enable_streams": "Keeps live subscriptions open for battery, climate, exterior and location so changes appear within seconds instead of on the next poll. Off by default: polling alone keeps everything up to date, and persistent subscriptions are the least predictable part of the unofficial API."
         },
-        "description": "How often to poll the Polestar cloud for updates. Lower values give faster updates but may increase server load and 12v battery usage."
+        "description": "Polling is tiered — each kind of data refreshes at a rate matched to how often it actually changes. Lower intervals mean fresher data but more requests to Polestar's servers and more 12V battery use."
       }
     }
   },

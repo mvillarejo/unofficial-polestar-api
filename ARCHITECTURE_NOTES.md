@@ -114,7 +114,7 @@ running and propagates each tier's success or failure out to every entity.
 
 `TIER_MULTIPLIERS` scale everything off one configured base interval, so a user
 who slows the integration down slows all of it down proportionally. Default
-base is 120s (was a flat 600s for everything).
+base is 300s (was a flat 600s for everything).
 
 | Tier | Multiplier | Default | Endpoints |
 |---|---|---|---|
@@ -208,11 +208,11 @@ replaced was the part that needed a real car to validate.
 
 1. **`CONF_UPDATE_INTERVAL` changed meaning.** It used to be "poll everything
    this often" (default 600s); it's now "the fast tier's interval" (default
-   120s), with other tiers as multiples. An existing entry with `600` will get
+   300s), with other tiers as multiples. An existing entry with `600` will get
    fast=600s / very_slow=5h, which is slower than before for configuration
    data. No config-entry migration was written because the values stay valid
    and the direction is conservative — but it may be worth a one-time migration
-   resetting existing entries to the new 120s default so people actually get
+   resetting existing entries to the new 300s default so people actually get
    the freshness improvement.
 2. **Streams default to off.** That's the reversible choice given the v0.7.0
    rollback. If the owner wants them on for his own install, it's one toggle in

@@ -21,7 +21,7 @@ PLATFORMS = [
 # The fast tier's poll interval. Every other tier is a fixed multiple of it,
 # so one setting scales the whole integration up or down together.
 CONF_UPDATE_INTERVAL = "update_interval"
-DEFAULT_UPDATE_INTERVAL = 120  # seconds
+DEFAULT_UPDATE_INTERVAL = 300  # seconds
 MIN_UPDATE_INTERVAL = 60
 MAX_UPDATE_INTERVAL = 1800
 

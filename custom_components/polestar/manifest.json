@@ -8,6 +8,6 @@
   "integration_type": "device",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/mvillarejo/unofficial-polestar-api/issues",
-  "requirements": ["unofficial-polestar-api@git+https://github.com/mvillarejo/unofficial-polestar-api.git@v0.7.0"],
-  "version": "0.7.0"
+  "requirements": ["unofficial-polestar-api@git+https://github.com/mvillarejo/unofficial-polestar-api.git@v0.8.0"],
+  "version": "0.8.0"
 }

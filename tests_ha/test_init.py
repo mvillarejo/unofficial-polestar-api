@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
+from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.polestar.const import CONF_DEMO, CONF_VIN, DOMAIN
 from custom_components.polestar.coordinator import TIER_ORDER
 
 
@@ -48,3 +50,21 @@ async def test_tiers_have_listeners_so_their_timers_run(coordinator) -> None:
 async def test_hub_has_no_interval_of_its_own(coordinator) -> None:
     """The hub never polls on a timer; the tiers do."""
     assert coordinator.update_interval is None
+
+
+async def test_demo_mode_sets_up(hass: HomeAssistant) -> None:
+    """Demo mode must survive the coordinator rewrite too."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="DEMO000000000001",
+        version=2,
+        data={CONF_VIN: "DEMO000000000001", CONF_DEMO: True},
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert entry.state is ConfigEntryState.LOADED
+    demo_coordinator = next(iter(entry.runtime_data.coordinators.values()))
+    assert demo_coordinator.data.battery is not None
+    assert len(demo_coordinator.tiers) == 4

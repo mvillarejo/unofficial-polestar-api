@@ -15,10 +15,10 @@ That was a missing-harness problem, not a code-quality one.
 | 0 — Infra | **done** | `tests_ha/`, `--extra ha`, `requires-python >= 3.13.2` |
 | 1 — Config flow | **done** | 10 tests, `tests_ha/test_config_flow.py` |
 | 2 — Coordinator | **done** | 17 tests, rewritten for the tiered design |
-| 3 — Entity commands | **partial** | Climate fully covered; other command entities pending |
+| 3 — Entity commands | **done** | Climate regressions plus lock/switch/button/number dispatch |
 | 4 — CI | **done** | `.github/workflows/test.yml` |
 
-`uv run pytest -q` → 131 passed (77 library + 54 HA), 31 live tests deselected.
+`uv run pytest -q` → 150 passed (77 library + 73 HA), 31 live tests deselected.
 
 ## Phase 0 — Infra (done)
 
@@ -67,7 +67,7 @@ started when enabled, a pushed value reaching entity state, restart-on-finish
 via the fast tier, cancellation on unload, and that polling continues
 regardless.
 
-## Phase 3 — Entity commands (partial)
+## Phase 3 — Entity commands (done)
 
 `tests_ha/test_climate.py` covers both production climate bugs and is the
 phase's main point:
@@ -86,10 +86,16 @@ phase's main point:
 still present, every one VIN-prefixed, no per-platform collisions, one device,
 every platform produced entities.
 
-**Still pending:** command coverage for `lock.py`, `button.py`, `select.py`,
-`time.py`, `switch.py`'s non-climate switches and `services.py` — "assert the
-right coordinator method is called with the right args", enough to catch a
-button that doesn't do what its label says.
+`tests_ha/test_commands.py` covers the "does the button do what its label
+says" class: lock/unlock, the charging and pre-cleaning switches, charge-timer
+activation preserving existing times, honk/flash and window/trunk buttons, the
+manual refresh button reaching *every* tier's endpoints rather than one, amp
+limit and target SoC (including the refusal in DAILY/LONG_TRIP mode), and that
+a failed command raises rather than reporting success.
+
+**Still pending:** `select.py`, `time.py` and `services.py` dispatch. Lower
+value — they follow the same `async_run_command` path already covered, and
+none of them has a known production bug.
 
 ## Phase 4 — CI (done)
 

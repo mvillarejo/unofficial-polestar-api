@@ -14,7 +14,17 @@ from polestar_api import PolestarApi
 from polestar_api.auth import MemoryTokenStore
 from polestar_api.exceptions import AuthError
 
-from .const import CONF_DEMO, CONF_UPDATE_INTERVAL, CONF_VIN, DEFAULT_UPDATE_INTERVAL, DOMAIN
+from .const import (
+    CONF_DEMO,
+    CONF_ENABLE_STREAMS,
+    CONF_UPDATE_INTERVAL,
+    CONF_VIN,
+    DEFAULT_ENABLE_STREAMS,
+    DEFAULT_UPDATE_INTERVAL,
+    DOMAIN,
+    MAX_UPDATE_INTERVAL,
+    MIN_UPDATE_INTERVAL,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -46,7 +56,7 @@ def _vehicle_options_schema(
         {
             vol.Required(CONF_VIN): vol.In(options),
             vol.Optional(CONF_UPDATE_INTERVAL, default=default_interval): vol.All(
-                int, vol.Range(min=60, max=86400)
+                int, vol.Range(min=MIN_UPDATE_INTERVAL, max=MAX_UPDATE_INTERVAL)
             ),
         }
     )
@@ -58,7 +68,7 @@ def _guest_vin_schema(default_interval: int = DEFAULT_UPDATE_INTERVAL) -> vol.Sc
         {
             vol.Required(CONF_VIN): str,
             vol.Optional(CONF_UPDATE_INTERVAL, default=default_interval): vol.All(
-                int, vol.Range(min=60, max=86400)
+                int, vol.Range(min=MIN_UPDATE_INTERVAL, max=MAX_UPDATE_INTERVAL)
             ),
         }
     )
@@ -73,16 +83,17 @@ class PolestarOptionsFlow(OptionsFlow):
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
 
-        current = self.config_entry.options.get(
-            CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL
-        )
+        options = self.config_entry.options
+        current = options.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL)
+        streams = options.get(CONF_ENABLE_STREAMS, DEFAULT_ENABLE_STREAMS)
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema(
                 {
                     vol.Optional(CONF_UPDATE_INTERVAL, default=current): vol.All(
-                        int, vol.Range(min=60, max=86400)
+                        int, vol.Range(min=MIN_UPDATE_INTERVAL, max=MAX_UPDATE_INTERVAL)
                     ),
+                    vol.Optional(CONF_ENABLE_STREAMS, default=streams): bool,
                 }
             ),
         )

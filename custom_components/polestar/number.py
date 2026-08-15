@@ -60,15 +60,13 @@ NUMBERS: tuple[PolestarNumberDescription, ...] = (
         device_class=NumberDeviceClass.TEMPERATURE,
         entity_category=EntityCategory.CONFIG,
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
-        native_min_value=0,
+        native_min_value=15,
         native_max_value=30,
         native_step=0.5,
-        value_fn=lambda c: (
-            c.data.climate.target_temperature_celsius
-            if c.data and c.data.climate and c.data.climate.target_temperature_celsius is not None
-            else c.climate_preferences.target_temperature
-        ),
-        set_fn=lambda c, val: None,
+        # Same property async_start_climate reads, so what the slider shows and
+        # what a start command sends cannot diverge.
+        value_fn=lambda c: c.climate_target_temperature,
+        set_fn=lambda c, val: c.async_set_climate_temperature(val),
         restore_state=True,
     ),
 )
@@ -114,7 +112,7 @@ class PolestarNumber(OptimisticStateMixin, PolestarEntity, RestoreEntity, Number
             return
 
         if self.entity_description.key == "climate_target_temperature":
-            self.coordinator.climate_preferences.target_temperature = restored
+            self.coordinator.set_climate_temperature_override(restored)
 
     @property
     def available(self) -> bool:
@@ -135,11 +133,6 @@ class PolestarNumber(OptimisticStateMixin, PolestarEntity, RestoreEntity, Number
         return self._resolve_optimistic(real_value)
 
     async def async_set_native_value(self, value: float) -> None:
-        if self.entity_description.key == "climate_target_temperature":
-            self.coordinator.climate_preferences.target_temperature = value
-            self._set_optimistic(value)
-            return
-
         self._set_optimistic(value)
         result = self.entity_description.set_fn(self.coordinator, value)
         if result is not None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 
@@ -13,7 +14,12 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.typing import ConfigType
 
 from .const import CONF_DEMO, CONF_VIN, DOMAIN, PLATFORMS
-from .coordinator import PolestarConfigEntry, PolestarCoordinator, PolestarRuntimeData
+from .coordinator import (
+    PolestarConfigEntry,
+    PolestarCoordinator,
+    PolestarRuntimeData,
+    PolestarTierCoordinator,
+)
 from .demo import DemoVehicle
 from polestar_api import PolestarApi, Vehicle
 from polestar_api.exceptions import AuthError
@@ -67,17 +73,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: PolestarConfigEntry) -> 
         vehicle = Vehicle(vin=configured_vin, connection=api._connection)
 
     coordinator = PolestarCoordinator(hass, vehicle, entry)
-    await coordinator.async_config_entry_first_refresh()
-    await coordinator.async_start_streams()
+    tiers = await _async_start_coordinator(coordinator)
     entry.runtime_data = PolestarRuntimeData(
         api=api,
         coordinators={vehicle.vin: coordinator},
+        tiers=tiers,
     )
 
     await _async_register_static_path(hass)
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
+
+
+async def _async_start_coordinator(
+    coordinator: PolestarCoordinator,
+) -> list[PolestarTierCoordinator]:
+    """Build the tier coordinators, prime them, and start optional streams.
+
+    Every tier is primed concurrently. async_config_entry_first_refresh raises
+    ConfigEntryNotReady when a tier's endpoints are all unreachable, so a
+    genuinely offline backend still fails setup with a retry rather than
+    creating entities that will never have data.
+    """
+    tiers = coordinator.create_tiers()
+    await asyncio.gather(*(tier.async_config_entry_first_refresh() for tier in tiers))
+    await coordinator.async_start_streams()
+    return tiers
 
 
 async def _async_options_updated(hass: HomeAssistant, entry: PolestarConfigEntry) -> None:
@@ -89,12 +111,12 @@ async def _async_setup_demo(hass: HomeAssistant, entry: PolestarConfigEntry) -> 
     """Set up a demo vehicle with fake data."""
     vehicle = DemoVehicle()
     coordinator = PolestarCoordinator(hass, vehicle, entry)
-    await coordinator.async_config_entry_first_refresh()
-    await coordinator.async_start_streams()
+    tiers = await _async_start_coordinator(coordinator)
 
     entry.runtime_data = PolestarRuntimeData(
         api=None,
         coordinators={vehicle.vin: coordinator},
+        tiers=tiers,
     )
 
     await _async_register_static_path(hass)

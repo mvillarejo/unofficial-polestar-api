@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from dataclasses import fields, is_dataclass
 from datetime import datetime
 from enum import Enum
@@ -13,7 +12,11 @@ from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.core import HomeAssistant
 
 from .const import CONF_VIN
-from .coordinator import PolestarConfigEntry, PolestarCoordinator
+from .coordinator import (
+    STREAM_METHODS,
+    PolestarConfigEntry,
+    PolestarCoordinator,
+)
 
 TO_REDACT = {
     CONF_EMAIL,
@@ -47,19 +50,14 @@ def _serialize(value: Any) -> Any:
 
 
 def _stream_diagnostics(coordinator: PolestarCoordinator) -> dict[str, Any]:
-    """Report liveness of the long-lived streaming subscriptions."""
-    now = time.monotonic()
+    """Report liveness of the optional long-lived subscriptions."""
     streams: dict[str, Any] = {}
-    for attr in sorted(coordinator._STREAMS):
+    for attr in sorted(STREAM_METHODS):
         task = coordinator._stream_tasks.get(attr)
-        last_data = coordinator._stream_last_data.get(attr)
         info: dict[str, Any] = {
             "started": task is not None,
             "running": task is not None and not task.done(),
             "supported": attr not in coordinator._unsupported_streams,
-            "seconds_since_last_data": (
-                round(now - last_data, 1) if last_data is not None else None
-            ),
         }
         if task is not None and task.done() and not task.cancelled():
             err = task.exception()
@@ -69,23 +67,36 @@ def _stream_diagnostics(coordinator: PolestarCoordinator) -> dict[str, Any]:
     return streams
 
 
+def _tier_diagnostics(coordinator: PolestarCoordinator) -> dict[str, Any]:
+    """Report each poll tier's interval, endpoints and last result."""
+    return {
+        tier: {
+            "interval_seconds": (
+                tier_coordinator.update_interval.total_seconds()
+                if tier_coordinator.update_interval is not None
+                else None
+            ),
+            "attrs": list(tier_coordinator.attrs),
+            "poll_count": tier_coordinator._poll_count,
+            "last_update_success": tier_coordinator.last_update_success,
+        }
+        for tier, tier_coordinator in coordinator.tiers.items()
+    }
+
+
 def _coordinator_diagnostics(coordinator: PolestarCoordinator) -> dict[str, Any]:
     """Dump one vehicle's coordinator state."""
     return {
         "model_name": coordinator.vehicle.model_name,
         "model_year": coordinator.vehicle.model_year,
-        "update_interval_seconds": (
-            coordinator.update_interval.total_seconds()
-            if coordinator.update_interval is not None
-            else None
-        ),
         "last_update_success": coordinator.last_update_success,
-        "poll_count": coordinator._poll_count,
-        "all_fetches_failed": coordinator._all_fetches_failed,
+        "tiers": _tier_diagnostics(coordinator),
+        "streams_enabled": coordinator.streams_enabled,
         "unsupported_fetches": sorted(coordinator._unsupported_fetches),
         "unsupported_streams": sorted(coordinator._unsupported_streams),
         "unsupported_commands": sorted(coordinator._unsupported_commands),
         "streams": _stream_diagnostics(coordinator),
+        "climate_target_temperature": coordinator.climate_target_temperature,
         "data": async_redact_data(_serialize(coordinator.data), TO_REDACT),
     }
 

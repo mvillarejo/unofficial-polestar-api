@@ -1,11 +1,27 @@
-"""DataUpdateCoordinator for Polestar vehicles."""
+"""Data update coordinators for Polestar vehicles.
+
+The integration uses a *hub + tiers* shape:
+
+``PolestarCoordinator`` (the hub) owns the single ``PolestarVehicleData``
+snapshot, every remote command, and the entity listener bus. It has no
+``update_interval`` of its own — it never polls on a timer.
+
+``PolestarTierCoordinator`` (four instances) each own a fixed list of
+endpoints matched to how often that data actually changes, poll them
+concurrently on their own timer, and apply the results into the hub. This
+mirrors the tiered-polling design of Home Assistant core's ``volvo``
+integration, which talks to the same vendor's cloud.
+
+Entities subscribe to the hub, so they see the complete merged snapshot no
+matter which tier last refreshed it, and their ``unique_id``s are unchanged
+from the single-coordinator design.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import time
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import MISSING, dataclass, field, fields, replace
 from datetime import time as dt_time, timedelta
 from typing import TYPE_CHECKING, Any
@@ -45,12 +61,21 @@ from polestar_api.models.parking_climate_timer import (
 from polestar_api.models.precleaning import PreCleaningInfo
 from polestar_api.models.weather import WeatherReport
 
-from .const import CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL, STREAM_MAX_RETRIES, STREAM_RETRY_DELAY
+from .const import (
+    CONF_ENABLE_STREAMS,
+    CONF_UPDATE_INTERVAL,
+    DEFAULT_CLIMATE_TEMPERATURE,
+    DEFAULT_ENABLE_STREAMS,
+    DEFAULT_UPDATE_INTERVAL,
+    MAX_UPDATE_INTERVAL,
+    MIN_UPDATE_INTERVAL,
+    STREAM_MAX_RETRIES,
+    STREAM_RETRY_DELAY,
+    TIER_MULTIPLIERS,
+)
 from .utils import local_utc_offset_minutes
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
-
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
 
@@ -62,12 +87,7 @@ _POST_COMMAND_REFRESH_DELAYS: tuple[int, ...] = (3, 5, 10, 15)
 # Endpoints that answered UNIMPLEMENTED are skipped on scheduled polls, but
 # re-probed this often in case the backend starts serving them again.
 _UNSUPPORTED_REPROBE_CYCLES = 6
-# A stream that stops pushing without erroring is indistinguishable from a healthy
-# idle one, so resubscribe after this many poll intervals of silence.
-_STREAM_STALE_POLL_INTERVALS = 3
-# Delay between opening successive stream subscriptions on startup, so ~15 concurrent
-# subscriptions don't all hit the backend in the same instant on every reload.
-_STREAM_START_STAGGER = 0.25
+_FETCH_TIMEOUT = 15
 _COMMAND_INVOCATION_SUCCESS = {
     InvocationStatus.SENT,
     InvocationStatus.DELIVERED,
@@ -81,9 +101,14 @@ _COMMAND_RESPONSE_STATUS_SUCCESS = {
 
 @dataclass
 class ClimateCommandPreferences:
-    """Preferences used for advanced climate start commands."""
+    """Seat and steering-wheel heating chosen in HA for climate start commands.
 
-    target_temperature: float = 0.0
+    The target temperature deliberately does *not* live here. It is resolved
+    from live car data by ``PolestarCoordinator.climate_target_temperature``
+    so that the value the number entity shows and the value a start command
+    sends can never drift apart.
+    """
+
     front_left_seat: HeatingIntensity = HeatingIntensity.UNSPECIFIED
     front_right_seat: HeatingIntensity = HeatingIntensity.UNSPECIFIED
     rear_left_seat: HeatingIntensity = HeatingIntensity.UNSPECIFIED
@@ -118,30 +143,85 @@ class PolestarVehicleData:
     climate_timer_settings: ParkingClimateTimerSettings | None = None
 
 
-_FETCH_ATTRS: tuple[tuple[str, str], ...] = (
-    ("battery", "get_battery"),
-    ("exterior", "get_exterior"),
-    ("location", "get_location"),
-    ("parked_location", "get_parked_location"),
-    ("odometer", "get_odometer"),
-    ("climate", "get_climate"),
-    ("dashboard", "get_dashboard"),
-    ("health", "get_health"),
-    ("availability", "get_availability"),
-    ("connectivity", "get_connectivity"),
-    ("precleaning", "get_precleaning"),
-    ("weather", "get_weather"),
-    ("software", "get_software_info"),
-    ("ota_schedule", "get_ota_schedule"),
-    ("target_soc", "get_target_soc"),
-    ("amp_limit", "get_amp_limit"),
-    ("charge_timer", "get_charge_timer"),
-    ("charge_locations", "get_charge_locations"),
-    ("current_charge_location", "is_at_charge_location"),
-    ("climate_timers", "get_climate_timers"),
-    ("climate_timer_settings", "get_climate_timer_settings"),
-)
-_FETCH_ATTR_LOOKUP = dict(_FETCH_ATTRS)
+_FETCH_ATTRS: dict[str, str] = {
+    "battery": "get_battery",
+    "exterior": "get_exterior",
+    "location": "get_location",
+    "parked_location": "get_parked_location",
+    "odometer": "get_odometer",
+    "climate": "get_climate",
+    "dashboard": "get_dashboard",
+    "health": "get_health",
+    "availability": "get_availability",
+    "connectivity": "get_connectivity",
+    "precleaning": "get_precleaning",
+    "weather": "get_weather",
+    "software": "get_software_info",
+    "ota_schedule": "get_ota_schedule",
+    "target_soc": "get_target_soc",
+    "amp_limit": "get_amp_limit",
+    "charge_timer": "get_charge_timer",
+    "charge_locations": "get_charge_locations",
+    "current_charge_location": "is_at_charge_location",
+    "climate_timers": "get_climate_timers",
+    "climate_timer_settings": "get_climate_timer_settings",
+}
+
+# Which endpoints each poll tier owns. Every key of _FETCH_ATTRS must appear in
+# exactly one tier — test_coordinator.py asserts both halves of that.
+TIER_FAST = "fast"
+TIER_MEDIUM = "medium"
+TIER_SLOW = "slow"
+TIER_VERY_SLOW = "very_slow"
+
+TIER_ATTRS: dict[str, tuple[str, ...]] = {
+    # Changes minute to minute while driving, charging or pre-conditioning.
+    TIER_FAST: (
+        "battery",
+        "climate",
+        "exterior",
+    ),
+    # Changes over a drive, but a couple of minutes of lag is imperceptible.
+    TIER_MEDIUM: (
+        "location",
+        "parked_location",
+        "odometer",
+        "dashboard",
+    ),
+    # Slow-moving status and charging configuration.
+    TIER_SLOW: (
+        "health",
+        "availability",
+        "connectivity",
+        "precleaning",
+        "weather",
+        "target_soc",
+        "amp_limit",
+    ),
+    # Configuration and schedules that essentially only change when someone
+    # changes them, and which are re-read eagerly after any command anyway.
+    TIER_VERY_SLOW: (
+        "software",
+        "ota_schedule",
+        "charge_timer",
+        "charge_locations",
+        "current_charge_location",
+        "climate_timers",
+        "climate_timer_settings",
+    ),
+}
+
+TIER_ORDER: tuple[str, ...] = (TIER_FAST, TIER_MEDIUM, TIER_SLOW, TIER_VERY_SLOW)
+
+# Live subscriptions are a latency accelerator only — polling above is the
+# freshness guarantee. Deliberately a short list, and off by default.
+STREAM_METHODS: dict[str, str] = {
+    "battery": "stream_battery",
+    "climate": "stream_climate",
+    "exterior": "stream_exterior",
+    "location": "stream_location",
+}
+
 _ATTR_FIELDS = {spec.name: spec for spec in fields(PolestarVehicleData)}
 
 
@@ -153,8 +233,27 @@ def _attr_default(attr: str) -> Any:
     return spec.default
 
 
+def tier_intervals(base_seconds: int) -> dict[str, timedelta]:
+    """Derive every tier's poll interval from the configured base interval.
+
+    *base_seconds* is the fast tier. The remaining tiers are fixed multiples of
+    it, so a user who slows the integration down slows all of it down together.
+    """
+
+    base = max(MIN_UPDATE_INTERVAL, min(base_seconds, MAX_UPDATE_INTERVAL))
+    return {tier: timedelta(seconds=base * TIER_MULTIPLIERS[tier]) for tier in TIER_ORDER}
+
+
 class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
-    """Coordinator that polls all vehicle data concurrently."""
+    """Hub coordinator: owns the vehicle snapshot, commands and listeners.
+
+    It has no update_interval — PolestarTierCoordinator instances do the
+    polling and feed results in through async_apply_values.
+    """
+
+    # Set on the class because the base __init__ assigns
+    # self.last_update_success, which is a property here.
+    _hub_update_success: bool = True
 
     def __init__(
         self,
@@ -166,22 +265,320 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
             hass,
             _LOGGER,
             name=f"Polestar {vehicle.vin}",
-            update_interval=timedelta(
-                seconds=entry.options.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL)
-            ),
+            update_interval=None,
             config_entry=entry,
             always_update=True,
         )
         self.vehicle = vehicle
         self.climate_preferences = ClimateCommandPreferences()
+        self.tiers: dict[str, PolestarTierCoordinator] = {}
+        self._unsub_tiers: list[Callable[[], None]] = []
+        self.data = PolestarVehicleData()
+        self._climate_temperature_override: float | None = None
         self._installed_version_cache: str | None = None
         self._stream_tasks: dict[str, asyncio.Task[None]] = {}
-        self._stream_last_data: dict[str, float] = {}
         self._unsupported_streams: set[str] = set()
         self._unsupported_commands: set[str] = set()
         self._unsupported_fetches: set[str] = set()
-        self._all_fetches_failed: bool = False
-        self._poll_count: int = 0
+
+    # ------------------------------------------------------------------
+    # Tier plumbing
+    # ------------------------------------------------------------------
+
+    def create_tiers(self) -> list[PolestarTierCoordinator]:
+        """Build the four interval coordinators for this vehicle."""
+        entry = self.config_entry
+        assert entry is not None
+        base = entry.options.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL)
+        intervals = tier_intervals(base)
+        self.tiers = {
+            tier: PolestarTierCoordinator(self, tier, TIER_ATTRS[tier], intervals[tier])
+            for tier in TIER_ORDER
+        }
+        for tier_coordinator in self.tiers.values():
+            # A DataUpdateCoordinator only arms its timer while it has at least
+            # one listener, and entities subscribe to the hub rather than to the
+            # tiers. Subscribing the hub's own notifier keeps the tier polling
+            # and propagates its success/failure to every entity.
+            self._unsub_tiers.append(
+                tier_coordinator.async_add_listener(self.async_update_listeners)
+            )
+        return list(self.tiers.values())
+
+    def async_apply_values(self, values: dict[str, Any]) -> None:
+        """Merge fetched/streamed values into the snapshot and notify entities."""
+        if not values:
+            return
+        self.data = replace(self.data, **values)
+        if "software" in values:
+            self._update_installed_version_cache(self.data.software)
+        self.async_update_listeners()
+
+    @property
+    def last_update_success(self) -> bool:
+        """Entities are available while at least one tier is still succeeding.
+
+        Derived rather than stored: the hub never polls on a timer, so it has
+        no update result of its own to report.
+        """
+        if not self.tiers:
+            return self._hub_update_success
+        return any(tier.last_update_success for tier in self.tiers.values())
+
+    @last_update_success.setter
+    def last_update_success(self, value: bool) -> None:
+        self._hub_update_success = value
+
+    @property
+    def tier_for_attr(self) -> dict[str, str]:
+        """Map each fetchable attribute to the tier that polls it."""
+        return {attr: tier for tier, attrs in TIER_ATTRS.items() for attr in attrs}
+
+    # ------------------------------------------------------------------
+    # Fetching
+    # ------------------------------------------------------------------
+
+    async def async_fetch_values(
+        self,
+        attrs: Iterable[str],
+        *,
+        probe_unsupported: bool = True,
+    ) -> tuple[dict[str, Any], int, int]:
+        """Fetch a set of attributes concurrently.
+
+        Returns the values that should be applied, how many calls succeeded and
+        how many were actually attempted. Attributes whose call failed are
+        simply absent from the result, so the previous value is kept — except
+        for UNIMPLEMENTED, which clears the attribute to its default rather
+        than pinning its entities to a pre-breakage snapshot forever.
+        """
+        requested = tuple(dict.fromkeys(attrs))
+        values: dict[str, Any] = {}
+
+        if probe_unsupported:
+            attr_names = requested
+        else:
+            attr_names = tuple(a for a in requested if a not in self._unsupported_fetches)
+
+        if not attr_names:
+            return values, 0, 0
+
+        results = await asyncio.gather(
+            *(
+                asyncio.wait_for(
+                    getattr(self.vehicle, _FETCH_ATTRS[attr])(), timeout=_FETCH_TIMEOUT
+                )
+                for attr in attr_names
+            ),
+            return_exceptions=True,
+        )
+
+        successful = 0
+        for attr, result in zip(attr_names, results, strict=True):
+            if isinstance(result, (AuthError, TokenExpiredError)):
+                raise ConfigEntryAuthFailed(str(result)) from result
+
+            if isinstance(result, GRPCError) and result.status is GrpcStatus.UNIMPLEMENTED:
+                if attr not in self._unsupported_fetches:
+                    self._unsupported_fetches.add(attr)
+                    _LOGGER.info(
+                        "Fetch %s not supported for %s: %s", attr, self.vehicle.vin, result
+                    )
+                values[attr] = _attr_default(attr)
+                continue
+
+            if isinstance(result, BaseException):
+                level = logging.DEBUG if attr in self._unsupported_fetches else logging.WARNING
+                _LOGGER.log(
+                    level, "Failed to fetch %s for %s: %s", attr, self.vehicle.vin, result
+                )
+                continue
+
+            if attr in self._unsupported_fetches:
+                self._unsupported_fetches.discard(attr)
+                _LOGGER.info("Fetch %s is supported again for %s", attr, self.vehicle.vin)
+
+            merged = self._merge_partial_update(attr, getattr(self.data, attr), result)
+            if merged is not None:
+                values[attr] = merged
+            successful += 1
+
+        return values, successful, len(attr_names)
+
+    async def _async_update_data(self) -> PolestarVehicleData:
+        """Refresh every attribute at once (manual refresh, not a timer)."""
+        values, successful, _ = await self.async_fetch_values(_FETCH_ATTRS)
+        if successful == 0:
+            raise UpdateFailed("All API calls failed")
+        self.data = replace(self.data, **values)
+        if "software" in values:
+            self._update_installed_version_cache(self.data.software)
+        return self.data
+
+    async def async_request_attrs_refresh(self, *attrs: str) -> None:
+        """Refresh only the requested attributes and notify entities."""
+        if not attrs:
+            await self.async_request_refresh()
+            return
+        values, successful, _ = await self.async_fetch_values(attrs)
+        if successful:
+            self.async_apply_values(values)
+
+    @staticmethod
+    def _merge_partial_update(attr: str, previous: Any, result: Any) -> Any:
+        """Merge backend partial updates for attrs that are not full snapshots."""
+        if result is None:
+            return None
+        if attr == "exterior" and previous is not None:
+            return result.merge(previous)
+        if attr == "climate" and previous is not None:
+            # GetLatestParkingClimatization can lag behind the live stream, so a
+            # post-command poll may return a snapshot older than what we already
+            # hold. Applying it makes the switch flip off and back on.
+            new_ts = getattr(result, "reported_at", None)
+            old_ts = getattr(previous, "reported_at", None)
+            if new_ts is not None and old_ts is not None and new_ts < old_ts:
+                return previous
+        if attr == "odometer" and previous is not None:
+            # odometer_km is TOTAL_INCREASING; an out-of-order snapshot would
+            # otherwise read as a counter reset in HA statistics. Compare the
+            # reading itself rather than its timestamp: a single skewed backend
+            # clock would pin the odometer forever, a lower reading cannot.
+            if result.odometer_meters < previous.odometer_meters:
+                return previous
+        return result
+
+    # ------------------------------------------------------------------
+    # Live streams (optional accelerator on top of polling)
+    # ------------------------------------------------------------------
+
+    @property
+    def streams_enabled(self) -> bool:
+        """Whether the user opted into live subscriptions."""
+        entry = self.config_entry
+        if entry is None:
+            return DEFAULT_ENABLE_STREAMS
+        return entry.options.get(CONF_ENABLE_STREAMS, DEFAULT_ENABLE_STREAMS)
+
+    async def async_start_streams(self) -> None:
+        """Start the optional live subscriptions, if enabled."""
+        if not self.streams_enabled or self._stream_tasks:
+            return
+        for attr, method_name in STREAM_METHODS.items():
+            if getattr(self.vehicle, method_name, None) is None:
+                continue
+            self._start_stream(attr)
+
+    def _start_stream(self, attr: str) -> None:
+        method = getattr(self.vehicle, STREAM_METHODS[attr], None)
+        if method is None:
+            return
+        self._stream_tasks[attr] = asyncio.create_task(
+            self._async_run_stream(attr, method),
+            name=f"polestar-{self.vehicle.vin}-{attr}-stream",
+        )
+
+    def async_restart_finished_streams(self) -> None:
+        """Restart subscriptions that ended, after a poll proved connectivity.
+
+        No staleness heuristics: a stream that is merely quiet is
+        indistinguishable from a healthy idle one, and polling already
+        guarantees the data stays fresh, so only genuinely finished tasks are
+        restarted.
+        """
+        if not self.streams_enabled:
+            return
+        for attr in STREAM_METHODS:
+            if attr in self._unsupported_streams:
+                continue
+            task = self._stream_tasks.get(attr)
+            if task is not None and not task.done():
+                continue
+            self._start_stream(attr)
+
+    async def _async_run_stream(
+        self,
+        attr: str,
+        stream_factory: Callable[[], Any],
+    ) -> None:
+        """Run one long-lived subscription and merge updates into the snapshot."""
+        consecutive_failures = 0
+        while True:
+            try:
+                received = False
+                async for value in stream_factory():
+                    received = True
+                    consecutive_failures = 0
+                    merged = self._merge_partial_update(attr, getattr(self.data, attr), value)
+                    if merged is not None:
+                        self.async_apply_values({attr: merged})
+                if received:
+                    # Server closed a subscription after delivering data (normal
+                    # GOAWAY behaviour) — resubscribe straight away.
+                    continue
+                consecutive_failures += 1
+                delay = self._stream_retry_delay(
+                    attr, consecutive_failures, RuntimeError("stream closed without data")
+                )
+                if delay is None:
+                    return
+                await asyncio.sleep(delay)
+            except asyncio.CancelledError:
+                raise
+            except (AuthError, TokenExpiredError) as err:
+                _LOGGER.warning(
+                    "Live %s stream auth failure for %s: %s", attr, self.vehicle.vin, err
+                )
+                await asyncio.sleep(STREAM_RETRY_DELAY)
+            except GRPCError as err:
+                if err.status is GrpcStatus.UNIMPLEMENTED:
+                    _LOGGER.debug(
+                        "Live %s stream not supported for %s, stopping", attr, self.vehicle.vin
+                    )
+                    self._unsupported_streams.add(attr)
+                    return
+                consecutive_failures += 1
+                delay = self._stream_retry_delay(attr, consecutive_failures, err)
+                if delay is None:
+                    return
+                await asyncio.sleep(delay)
+            except Exception as err:  # noqa: BLE001
+                consecutive_failures += 1
+                delay = self._stream_retry_delay(attr, consecutive_failures, err)
+                if delay is None:
+                    return
+                await asyncio.sleep(delay)
+
+    def _stream_retry_delay(self, attr: str, failures: int, err: Exception) -> float | None:
+        """Return the backoff delay in seconds, or None to stop retrying."""
+        if failures >= STREAM_MAX_RETRIES:
+            _LOGGER.warning(
+                "Live %s stream for %s failed %d times in a row, giving up — "
+                "data still updates via polling",
+                attr, self.vehicle.vin, failures,
+            )
+            return None
+        return min(STREAM_RETRY_DELAY * (2 ** (failures - 1)), 600)
+
+    async def async_shutdown(self) -> None:
+        """Stop the tiers and cancel any running stream tasks."""
+        for unsub in self._unsub_tiers:
+            unsub()
+        self._unsub_tiers.clear()
+        for tier_coordinator in self.tiers.values():
+            await tier_coordinator.async_shutdown()
+        self.tiers.clear()
+        for task in self._stream_tasks.values():
+            task.cancel()
+        if self._stream_tasks:
+            await asyncio.gather(*self._stream_tasks.values(), return_exceptions=True)
+        self._stream_tasks.clear()
+        self._unsupported_streams.clear()
+        await super().async_shutdown()
+
+    # ------------------------------------------------------------------
+    # Commands
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _command_succeeded(response: Any) -> bool:
@@ -233,18 +630,16 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
         timeout: int = 30,
         capability: str | None = None,
     ) -> Any:
-        """Run a remote command and validate its response.
-
-        If *capability* is set and the server returns FAILED_PRECONDITION or
-        UNIMPLEMENTED, the capability is marked as unsupported so entities can
-        become unavailable instead of repeatedly failing.
-        """
+        """Run a remote command and validate its response."""
         try:
             response = await asyncio.wait_for(command(), timeout=timeout)
         except TimeoutError:
             raise HomeAssistantError(f"{error_message} (timed out after {timeout}s)")
         except GRPCError as err:
-            if capability and err.status in (GrpcStatus.UNIMPLEMENTED, GrpcStatus.FAILED_PRECONDITION):
+            if capability and err.status in (
+                GrpcStatus.UNIMPLEMENTED,
+                GrpcStatus.FAILED_PRECONDITION,
+            ):
                 self._unsupported_commands.add(capability)
             raise HomeAssistantError(self._command_error_message(err, error_message))
         if not self._command_succeeded(response):
@@ -257,21 +652,121 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
 
     def _schedule_background_refresh(self, *attrs: str) -> None:
         """Kick off a background refresh for the given attributes."""
+        entry = self.config_entry
+        assert entry is not None
         label = ",".join(attrs) if attrs else "full"
-        self.config_entry.async_create_background_task(
+        entry.async_create_background_task(
             self.hass,
             self.async_refresh_after_command(*attrs),
             name=f"polestar-{self.vehicle.vin}-{label}-refresh",
         )
 
     def async_refresh_exterior_after_command(self) -> None:
-        """Kick off a background exterior refresh (fallback for when the stream is slow)."""
+        """Kick off a background exterior refresh."""
         self._schedule_background_refresh("exterior")
 
+    async def async_refresh_after_command(self, *attrs: str) -> None:
+        """Refresh after a command, allowing backend state to settle first."""
+        refresh_attrs = tuple(dict.fromkeys(attrs))
+        for delay in _POST_COMMAND_REFRESH_DELAYS:
+            await asyncio.sleep(delay)
+            try:
+                await self.async_request_attrs_refresh(*refresh_attrs)
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug(
+                    "Delayed refresh failed after command for %s (%s): %s",
+                    self.vehicle.vin,
+                    ",".join(refresh_attrs) if refresh_attrs else "full",
+                    err,
+                )
+
+    # ------------------------------------------------------------------
+    # Climate
+    # ------------------------------------------------------------------
+
     @property
-    def installed_version_cache(self) -> str | None:
-        """Return the best known installed OTA version."""
-        return self._installed_version_cache
+    def climate_target_temperature(self) -> float:
+        """The temperature a climate start command will use.
+
+        Resolution order: an explicit override set in HA, then the target the
+        car itself reports, then a sane default. Both the number entity and
+        ``async_start_climate`` read this same property, which is what stops
+        them drifting apart — the previous design cached the HA-side value
+        separately and sent an invalid 0.0 whenever the user had never touched
+        the slider.
+        """
+        if self._climate_temperature_override is not None:
+            return self._climate_temperature_override
+        climate = self.data.climate if self.data else None
+        reported = getattr(climate, "target_temperature_celsius", None)
+        if reported:
+            return float(reported)
+        return DEFAULT_CLIMATE_TEMPERATURE
+
+    def set_climate_temperature_override(self, value: float | None) -> None:
+        """Override the target temperature used by climate start commands."""
+        self._climate_temperature_override = value
+
+    async def async_set_climate_temperature(self, value: float) -> None:
+        """Set the climate target temperature.
+
+        While climatisation is running the new temperature is sent to the car
+        straight away — the car has no separate 'set temperature' command, so
+        restarting climate with the new value is how it takes effect. While it
+        is off, the value is only remembered for the next start.
+        """
+        self.set_climate_temperature_override(value)
+        if self.climate_is_active:
+            await self.async_start_climate(temperature=value)
+
+    async def async_start_climate(
+        self,
+        *,
+        temperature: float | None = None,
+        front_left_seat: HeatingIntensity | None = None,
+        front_right_seat: HeatingIntensity | None = None,
+        rear_left_seat: HeatingIntensity | None = None,
+        rear_right_seat: HeatingIntensity | None = None,
+        steering_wheel: HeatingIntensity | None = None,
+    ) -> Any:
+        """Start climate using resolved preferences unless values are given."""
+        prefs = self.climate_preferences
+        response = await self.vehicle.start_climate(
+            temperature=self.climate_target_temperature if temperature is None else temperature,
+            front_left_seat=prefs.front_left_seat if front_left_seat is None else front_left_seat,
+            front_right_seat=(
+                prefs.front_right_seat if front_right_seat is None else front_right_seat
+            ),
+            rear_left_seat=prefs.rear_left_seat if rear_left_seat is None else rear_left_seat,
+            rear_right_seat=prefs.rear_right_seat if rear_right_seat is None else rear_right_seat,
+            steering_wheel=prefs.steering_wheel if steering_wheel is None else steering_wheel,
+        )
+        if not self._command_succeeded(response):
+            raise HomeAssistantError(
+                self._command_error_message(response, "Start climate command failed")
+            )
+        self._schedule_background_refresh("climate")
+        return response
+
+    async def async_stop_climate(self) -> Any:
+        """Stop climate and refresh state."""
+        response = await self.vehicle.stop_climate()
+        if not self._command_succeeded(response):
+            raise HomeAssistantError(
+                self._command_error_message(response, "Stop climate command failed")
+            )
+        self._schedule_background_refresh("climate")
+        return response
+
+    @property
+    def climate_is_active(self) -> bool:
+        """Whether the car reports climatisation as currently running."""
+        climate = self.data.climate if self.data else None
+        return bool(getattr(climate, "is_active", False))
+
+    # ------------------------------------------------------------------
+    # Charging
+    # ------------------------------------------------------------------
 
     @property
     def current_charge_location_details(self) -> ChargeLocation | None:
@@ -286,352 +781,6 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
                 return location
         return None
 
-    async def _async_fetch_values(
-        self,
-        attrs: Iterable[str],
-        previous: PolestarVehicleData,
-        *,
-        probe_unsupported: bool = True,
-    ) -> tuple[dict[str, Any], int]:
-        """Fetch a subset of vehicle attributes concurrently."""
-        requested = tuple(dict.fromkeys(attrs))
-        values: dict[str, Any] = {}
-        if probe_unsupported:
-            attr_names = requested
-        else:
-            attr_names = tuple(a for a in requested if a not in self._unsupported_fetches)
-            for attr in self._unsupported_fetches.intersection(requested):
-                values[attr] = _attr_default(attr)
-
-        coroutines = [
-            asyncio.wait_for(getattr(self.vehicle, _FETCH_ATTR_LOOKUP[attr])(), timeout=15)
-            for attr in attr_names
-        ]
-        results = await asyncio.gather(*coroutines, return_exceptions=True)
-
-        successful_fetches = 0
-        for attr, result in zip(attr_names, results, strict=True):
-            if isinstance(result, (AuthError, TokenExpiredError)):
-                raise ConfigEntryAuthFailed(str(result)) from result
-            if isinstance(result, GRPCError) and result.status is GrpcStatus.UNIMPLEMENTED:
-                if attr not in self._unsupported_fetches:
-                    self._unsupported_fetches.add(attr)
-                    _LOGGER.info("Fetch %s not supported for %s: %s", attr, self.vehicle.vin, result)
-                else:
-                    _LOGGER.debug("Fetch %s not supported for %s: %s", attr, self.vehicle.vin, result)
-                # Clear rather than carry the last good value forward: an
-                # endpoint the backend has withdrawn would otherwise pin its
-                # sensors to a snapshot from before the breakage, forever.
-                values[attr] = _attr_default(attr)
-                continue
-            if isinstance(result, BaseException):
-                if attr in self._unsupported_fetches:
-                    _LOGGER.debug("Failed to fetch %s for %s: %s", attr, self.vehicle.vin, result)
-                else:
-                    _LOGGER.warning("Failed to fetch %s for %s: %s", attr, self.vehicle.vin, result)
-                values[attr] = getattr(previous, attr)
-                continue
-
-            if attr in self._unsupported_fetches:
-                self._unsupported_fetches.discard(attr)
-                _LOGGER.info("Fetch %s is supported again for %s", attr, self.vehicle.vin)
-            result = self._merge_partial_update(attr, getattr(previous, attr), result)
-            values[attr] = getattr(previous, attr) if result is None else result
-            successful_fetches += 1
-
-        return values, successful_fetches
-
-    async def _async_update_data(self) -> PolestarVehicleData:
-        previous = self.data or PolestarVehicleData()
-        self._poll_count += 1
-        values, successful_fetches = await self._async_fetch_values(
-            _FETCH_ATTR_LOOKUP,
-            previous,
-            probe_unsupported=self._poll_count % _UNSUPPORTED_REPROBE_CYCLES == 1,
-        )
-
-        if successful_fetches == 0:
-            if self.data is not None:
-                if not self._all_fetches_failed:
-                    self._all_fetches_failed = True
-                    _LOGGER.warning(
-                        "All %d attribute fetches failed for %s; keeping previous data",
-                        len(_FETCH_ATTR_LOOKUP),
-                        self.vehicle.vin,
-                    )
-                else:
-                    _LOGGER.debug(
-                        "All %d attribute fetches failed for %s; keeping previous data",
-                        len(_FETCH_ATTR_LOOKUP),
-                        self.vehicle.vin,
-                    )
-                return self.data
-            raise UpdateFailed("All API calls failed")
-
-        if self._all_fetches_failed:
-            self._all_fetches_failed = False
-            _LOGGER.info("Attribute fetches recovered for %s", self.vehicle.vin)
-
-        data = PolestarVehicleData(**values)
-        self._update_installed_version_cache(data.software)
-        self._unsupported_commands.clear()
-        await self._restart_dead_streams()
-        return data
-
-    async def async_request_attrs_refresh(self, *attrs: str) -> None:
-        """Refresh only the requested coordinator attributes."""
-        if not attrs:
-            await self.async_request_refresh()
-            return
-
-        previous = self.data or PolestarVehicleData()
-        values, successful_fetches = await self._async_fetch_values(attrs, previous)
-        if successful_fetches == 0:
-            return
-
-        data = replace(previous, **values)
-        if "software" in values:
-            self._update_installed_version_cache(data.software)
-        self._async_push_partial_update(data)
-
-    def _async_push_partial_update(self, data: PolestarVehicleData) -> None:
-        """Update coordinator data and notify listeners without rearming the poll timer.
-
-        Unlike async_set_updated_data, this must not defer the scheduled full poll:
-        both streams and post-command attr refreshes only ever touch a subset of
-        attributes, so they have no business resetting the interval the real poll
-        relies on.
-        """
-        self.data = data
-        self.async_update_listeners()
-
-    _STREAMS: dict[str, str] = {
-        "battery": "stream_battery",
-        "location": "stream_location",
-        "parked_location": "stream_parked_location",
-        "climate": "stream_climate",
-        "exterior": "stream_exterior",
-        "precleaning": "stream_precleaning",
-        "odometer": "stream_odometer",
-        "health": "stream_health",
-        "target_soc": "stream_target_soc",
-        "amp_limit": "stream_amp_limit",
-        "charge_timer": "stream_charge_timer",
-        "software": "stream_software_info",
-        "ota_schedule": "stream_ota_schedule",
-        "climate_timers": "stream_climate_timers",
-        "climate_timer_settings": "stream_climate_timer_settings",
-    }
-
-    async def async_start_streams(self) -> None:
-        """Start background stream tasks for live battery/location/exterior/climate updates.
-
-        Staggered rather than fired in one batch, so 15 subscriptions don't open against
-        the backend within the same tick on every reload.
-        """
-        if self._stream_tasks:
-            return
-        first = True
-        for attr, method_name in self._STREAMS.items():
-            method = getattr(self.vehicle, method_name, None)
-            if method is None:
-                continue
-            if not first:
-                await asyncio.sleep(_STREAM_START_STAGGER)
-            first = False
-            self._stream_tasks[attr] = asyncio.create_task(
-                self._async_run_stream(attr, method),
-                name=f"polestar-{self.vehicle.vin}-{attr}-stream",
-            )
-
-    async def _restart_dead_streams(self) -> None:
-        """Restart streams that gave up or went silent, after a poll proves connectivity."""
-        stale_after = (
-            self.update_interval.total_seconds() * _STREAM_STALE_POLL_INTERVALS
-            if self.update_interval is not None
-            else None
-        )
-        now = time.monotonic()
-        for attr, method_name in self._STREAMS.items():
-            if attr in self._unsupported_streams:
-                continue
-            task = self._stream_tasks.get(attr)
-            if task is not None and not task.done():
-                last_data = self._stream_last_data.get(attr)
-                # A task that has never yielded may just be a slow first message;
-                # only resubscribe when a previously working stream went quiet.
-                if stale_after is None or last_data is None or now - last_data < stale_after:
-                    continue
-                _LOGGER.warning(
-                    "Live %s stream for %s delivered nothing for %.0fs, resubscribing",
-                    attr, self.vehicle.vin, now - last_data,
-                )
-                task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
-                self._stream_last_data.pop(attr, None)
-            method = getattr(self.vehicle, method_name, None)
-            if method is None:
-                continue
-            self._stream_tasks[attr] = asyncio.create_task(
-                self._async_run_stream(attr, method),
-                name=f"polestar-{self.vehicle.vin}-{attr}-stream",
-            )
-
-    async def async_shutdown(self) -> None:
-        """Cancel any running stream tasks."""
-        for task in self._stream_tasks.values():
-            task.cancel()
-        if self._stream_tasks:
-            await asyncio.gather(*self._stream_tasks.values(), return_exceptions=True)
-        self._stream_tasks.clear()
-        self._stream_last_data.clear()
-        self._unsupported_streams.clear()
-        await super().async_shutdown()
-
-    async def _async_run_stream(
-        self,
-        attr: str,
-        stream_factory: Callable[[], Awaitable[Any] | Any],
-    ) -> None:
-        """Run a single long-lived stream and merge updates into coordinator state."""
-        consecutive_failures = 0
-        while True:
-            try:
-                received = False
-                async for value in stream_factory():
-                    received = True
-                    consecutive_failures = 0
-                    self._stream_last_data[attr] = time.monotonic()
-                    current = self.data or PolestarVehicleData()
-                    merged_value = self._merge_partial_update(attr, getattr(current, attr), value)
-                    if attr == "software":
-                        self._update_installed_version_cache(merged_value)
-                    self._async_push_partial_update(replace(current, **{attr: merged_value}))
-                if received:
-                    # Server closed a subscription after delivering data (normal
-                    # GOAWAY behaviour) — resubscribe straight away.
-                    continue
-                # Ended without an error and without a single message: back off,
-                # otherwise this becomes an unbounded reconnect loop.
-                consecutive_failures += 1
-                delay = self._stream_retry_delay(
-                    attr, consecutive_failures, RuntimeError("stream closed without data")
-                )
-                if delay is None:
-                    return
-                await asyncio.sleep(delay)
-            except asyncio.CancelledError:
-                raise
-            except (AuthError, TokenExpiredError) as err:
-                _LOGGER.warning("Live %s stream auth failure for %s: %s", attr, self.vehicle.vin, err)
-                await asyncio.sleep(STREAM_RETRY_DELAY)
-            except GRPCError as err:
-                if err.status == GrpcStatus.UNIMPLEMENTED:
-                    _LOGGER.debug("Live %s stream not supported for %s, stopping", attr, self.vehicle.vin)
-                    self._unsupported_streams.add(attr)
-                    return
-                consecutive_failures += 1
-                delay = self._stream_retry_delay(attr, consecutive_failures, err)
-                if delay is None:
-                    return
-                await asyncio.sleep(delay)
-            except Exception as err:  # noqa: BLE001
-                consecutive_failures += 1
-                delay = self._stream_retry_delay(attr, consecutive_failures, err)
-                if delay is None:
-                    return
-                await asyncio.sleep(delay)
-
-    def _stream_retry_delay(self, attr: str, failures: int, err: Exception) -> float | None:
-        """Return the backoff delay in seconds, or None to stop retrying."""
-        if failures >= STREAM_MAX_RETRIES:
-            _LOGGER.warning(
-                "Live %s stream for %s failed %d times in a row, giving up — "
-                "data will still update via polling. "
-                "Reload the integration to restart streams",
-                attr, self.vehicle.vin, failures,
-            )
-            return None
-        delay = min(STREAM_RETRY_DELAY * (2 ** (failures - 1)), 600)
-        _LOGGER.debug("Live %s stream failed for %s (attempt %d): %s — retrying in %ds",
-                       attr, self.vehicle.vin, failures, err, delay)
-        return delay
-
-    @staticmethod
-    def _merge_partial_update(attr: str, previous: Any, result: Any) -> Any:
-        """Merge backend partial updates for attrs that are not full snapshots."""
-        if result is None:
-            return None
-        if attr == "exterior" and previous is not None:
-            return result.merge(previous)
-        if attr == "climate" and previous is not None:
-            # GetLatestParkingClimatization can lag behind the live stream, so a
-            # post-command poll may return a snapshot older than what we already
-            # hold. Applying it makes the switch flip off and back on.
-            new_ts = getattr(result, "reported_at", None)
-            old_ts = getattr(previous, "reported_at", None)
-            if new_ts is not None and old_ts is not None and new_ts < old_ts:
-                return previous
-        if attr == "odometer" and previous is not None:
-            # odometer_km is TOTAL_INCREASING; an out-of-order snapshot from the poll
-            # racing the stream would otherwise read as a counter reset in HA statistics.
-            # Compare the reading itself rather than its timestamp: a single skewed
-            # backend clock would pin the odometer forever, a lower reading cannot.
-            if result.odometer_meters < previous.odometer_meters:
-                return previous
-        return result
-
-    async def async_refresh_after_command(self, *attrs: str) -> None:
-        """Refresh after a command, allowing backend state to settle first."""
-        refresh_attrs = tuple(dict.fromkeys(attrs))
-        for delay in _POST_COMMAND_REFRESH_DELAYS:
-            await asyncio.sleep(delay)
-            try:
-                if refresh_attrs:
-                    await self.async_request_attrs_refresh(*refresh_attrs)
-                else:
-                    await self.async_request_refresh()
-            except Exception as err:  # noqa: BLE001
-                _LOGGER.debug(
-                    "Delayed refresh failed after command for %s (%s): %s",
-                    self.vehicle.vin,
-                    ",".join(refresh_attrs) if refresh_attrs else "full",
-                    err,
-                )
-
-    async def async_start_climate(
-        self,
-        *,
-        temperature: float | None = None,
-        front_left_seat: HeatingIntensity | None = None,
-        front_right_seat: HeatingIntensity | None = None,
-        rear_left_seat: HeatingIntensity | None = None,
-        rear_right_seat: HeatingIntensity | None = None,
-        steering_wheel: HeatingIntensity | None = None,
-    ) -> Any:
-        """Start climate using command preferences unless explicit values are provided."""
-        prefs = self.climate_preferences
-        response = await self.vehicle.start_climate(
-            temperature=prefs.target_temperature if temperature is None else temperature,
-            front_left_seat=prefs.front_left_seat if front_left_seat is None else front_left_seat,
-            front_right_seat=prefs.front_right_seat if front_right_seat is None else front_right_seat,
-            rear_left_seat=prefs.rear_left_seat if rear_left_seat is None else rear_left_seat,
-            rear_right_seat=prefs.rear_right_seat if rear_right_seat is None else rear_right_seat,
-            steering_wheel=prefs.steering_wheel if steering_wheel is None else steering_wheel,
-        )
-        if not self._command_succeeded(response):
-            raise HomeAssistantError(self._command_error_message(response, "Start climate command failed"))
-        self._schedule_background_refresh("climate")
-        return response
-
-    async def async_stop_climate(self) -> Any:
-        """Stop climate and refresh state."""
-        response = await self.vehicle.stop_climate()
-        if not self._command_succeeded(response):
-            raise HomeAssistantError(self._command_error_message(response, "Stop climate command failed"))
-        self._schedule_background_refresh("climate")
-        return response
-
     @property
     def target_soc_setting_type(self) -> ChargeTargetLevelSettingType | None:
         """The car's currently active target SoC mode, or None if unknown."""
@@ -643,16 +792,9 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
         return setting_type
 
     async def async_set_target_soc(self, level: int) -> TargetSocResponse:
-        """Set the target SoC level, keeping the car's current mode.
-
-        Never switches mode implicitly — in DAILY/LONG_TRIP the car ignores the
-        level and keeps its preset, so this won't override the app's config.
-        Use async_set_target_soc_mode to switch mode explicitly.
-        """
+        """Set the target SoC level, keeping the car's current mode."""
         mode = self.target_soc_setting_type or ChargeTargetLevelSettingType.CUSTOM
         if mode != ChargeTargetLevelSettingType.CUSTOM:
-            # The car ignores a custom level in daily/long-trip mode (it charges to
-            # a fixed preset). Tell the user instead of silently snapping back.
             raise HomeAssistantError(
                 f"Target SoC is in {mode.name.lower().replace('_', ' ')} mode, which "
                 "charges to a fixed preset and ignores a specific level. Set the "
@@ -670,9 +812,7 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
     ) -> TargetSocResponse:
         """Explicitly switch the car's target SoC mode (daily/long_trip/custom)."""
         level = (
-            self.data.target_soc.target_level
-            if self.data and self.data.target_soc
-            else 0
+            self.data.target_soc.target_level if self.data and self.data.target_soc else 0
         )
         response = await self.async_run_command(
             lambda: self.vehicle.set_target_soc(level, mode),
@@ -689,24 +829,6 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
         )
         self._schedule_background_refresh("amp_limit")
         return response
-
-    async def async_start_precleaning(self) -> None:
-        """Start cabin pre-cleaning."""
-        await self.async_run_command(
-            self.vehicle.start_precleaning,
-            error_message="Start pre-cleaning command failed",
-            capability="precleaning",
-        )
-        self._schedule_background_refresh("precleaning")
-
-    async def async_stop_precleaning(self) -> None:
-        """Stop cabin pre-cleaning."""
-        await self.async_run_command(
-            self.vehicle.stop_precleaning,
-            error_message="Stop pre-cleaning command failed",
-            capability="precleaning",
-        )
-        self._schedule_background_refresh("precleaning")
 
     async def async_start_charging(self) -> int:
         """Start immediate charging."""
@@ -728,40 +850,6 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
         self._schedule_background_refresh("battery")
         return response
 
-    async def async_open_windows(self) -> Any:
-        """Open all windows."""
-        response = await self.async_run_command(
-            self.vehicle.open_windows,
-            error_message="Open windows command failed",
-            capability="open_windows",
-        )
-        self._schedule_background_refresh("exterior")
-        return response
-
-    async def async_close_windows(self) -> Any:
-        """Close all windows."""
-        response = await self.async_run_command(
-            self.vehicle.close_windows,
-            error_message="Close windows command failed",
-            capability="close_windows",
-        )
-        self._schedule_background_refresh("exterior")
-        return response
-
-    async def async_unlock_trunk(self) -> Any:
-        """Unlock the trunk."""
-        response = await self.async_run_command(
-            self.vehicle.unlock_trunk,
-            error_message="Unlock trunk command failed",
-            capability="unlock_trunk",
-        )
-        self._schedule_background_refresh("exterior")
-        return response
-
-    def restore_installed_version_cache(self, version: str) -> None:
-        """Restore the installed OTA version cache from HA state."""
-        self._installed_version_cache = version
-
     async def async_set_charge_timer(
         self,
         *,
@@ -770,6 +858,7 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
         activated: bool | None = None,
     ) -> ChargeTimerResponse:
         """Set the global charge timer while preserving unspecified fields."""
+
         def _daily(t: dt_time) -> DailyTime:
             return DailyTime(
                 hour=t.hour,
@@ -788,7 +877,9 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
         )
         response = await self.vehicle.set_charge_timer(timer)
         if not self._command_succeeded(response):
-            raise HomeAssistantError(self._command_error_message(response, "Set charge timer command failed"))
+            raise HomeAssistantError(
+                self._command_error_message(response, "Set charge timer command failed")
+            )
         self._schedule_background_refresh("charge_timer")
         return response
 
@@ -839,45 +930,90 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
         await self.vehicle.delete_charge_location(location_id)
         self._schedule_background_refresh("charge_locations", "current_charge_location")
 
+    # ------------------------------------------------------------------
+    # Body / cabin
+    # ------------------------------------------------------------------
+
+    async def async_start_precleaning(self) -> None:
+        """Start cabin pre-cleaning."""
+        await self.async_run_command(
+            self.vehicle.start_precleaning,
+            error_message="Start pre-cleaning command failed",
+            capability="precleaning",
+        )
+        self._schedule_background_refresh("precleaning")
+
+    async def async_stop_precleaning(self) -> None:
+        """Stop cabin pre-cleaning."""
+        await self.async_run_command(
+            self.vehicle.stop_precleaning,
+            error_message="Stop pre-cleaning command failed",
+            capability="precleaning",
+        )
+        self._schedule_background_refresh("precleaning")
+
+    async def async_open_windows(self) -> Any:
+        """Open all windows."""
+        response = await self.async_run_command(
+            self.vehicle.open_windows,
+            error_message="Open windows command failed",
+            capability="open_windows",
+        )
+        self._schedule_background_refresh("exterior")
+        return response
+
+    async def async_close_windows(self) -> Any:
+        """Close all windows."""
+        response = await self.async_run_command(
+            self.vehicle.close_windows,
+            error_message="Close windows command failed",
+            capability="close_windows",
+        )
+        self._schedule_background_refresh("exterior")
+        return response
+
+    async def async_unlock_trunk(self) -> Any:
+        """Unlock the trunk."""
+        response = await self.async_run_command(
+            self.vehicle.unlock_trunk,
+            error_message="Unlock trunk command failed",
+            capability="unlock_trunk",
+        )
+        self._schedule_background_refresh("exterior")
+        return response
+
+    # ------------------------------------------------------------------
+    # OTA
+    # ------------------------------------------------------------------
+
+    @property
+    def installed_version_cache(self) -> str | None:
+        """Return the best known installed OTA version."""
+        return self._installed_version_cache
+
+    def restore_installed_version_cache(self, version: str) -> None:
+        """Restore the installed OTA version cache from HA state."""
+        self._installed_version_cache = version
+
     async def async_schedule_ota(self, relative_time: int = 0) -> Scheduler | None:
         """Schedule an OTA update using the currently advertised software id."""
-        software_id = self._require_software_id()
-        scheduler = await self.vehicle.schedule_ota(software_id, relative_time=relative_time)
+        scheduler = await self.vehicle.schedule_ota(
+            self._require_software_id(), relative_time=relative_time
+        )
         self._schedule_background_refresh("software", "ota_schedule")
         return scheduler
 
     async def async_install_ota_now(self) -> Scheduler | None:
         """Install the current OTA update immediately."""
-        software_id = self._require_software_id()
-        scheduler = await self.vehicle.install_ota_now(software_id)
+        scheduler = await self.vehicle.install_ota_now(self._require_software_id())
         self._schedule_background_refresh("software", "ota_schedule")
         return scheduler
 
     async def async_cancel_ota(self) -> Scheduler | None:
         """Cancel any scheduled OTA update."""
-        software_id = self._require_software_id()
-        scheduler = await self.vehicle.cancel_ota(software_id)
+        scheduler = await self.vehicle.cancel_ota(self._require_software_id())
         self._schedule_background_refresh("software", "ota_schedule")
         return scheduler
-
-    async def async_delete_climate_timer(self, timer_id: str) -> None:
-        """Delete a parking climate timer."""
-        await self.vehicle.delete_climate_timer(timer_id)
-        self._schedule_background_refresh("climate_timers")
-
-    async def async_set_climate_timer(self, timer: ParkingClimateTimer) -> int:
-        """Create or update a parking climate timer."""
-        status = await self.vehicle.set_climate_timer(timer)
-        self._schedule_background_refresh("climate_timers")
-        return status
-
-    async def async_set_climate_timer_settings(
-        self, settings: ParkingClimateTimerSettings,
-    ) -> int:
-        """Set the default climate settings for parking climate timers."""
-        status = await self.vehicle.set_climate_timer_settings(settings)
-        self._schedule_background_refresh("climate_timer_settings")
-        return status
 
     def _require_software_id(self) -> str:
         """Return the software id from current state or raise a service-friendly error."""
@@ -897,6 +1033,74 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
         }:
             self._installed_version_cache = software.new_sw_version
 
+    # ------------------------------------------------------------------
+    # Climate timers
+    # ------------------------------------------------------------------
+
+    async def async_delete_climate_timer(self, timer_id: str) -> None:
+        """Delete a parking climate timer."""
+        await self.vehicle.delete_climate_timer(timer_id)
+        self._schedule_background_refresh("climate_timers")
+
+    async def async_set_climate_timer(self, timer: ParkingClimateTimer) -> int:
+        """Create or update a parking climate timer."""
+        status = await self.vehicle.set_climate_timer(timer)
+        self._schedule_background_refresh("climate_timers")
+        return status
+
+    async def async_set_climate_timer_settings(
+        self, settings: ParkingClimateTimerSettings
+    ) -> int:
+        """Set the default climate settings for parking climate timers."""
+        status = await self.vehicle.set_climate_timer_settings(settings)
+        self._schedule_background_refresh("climate_timer_settings")
+        return status
+
+
+class PolestarTierCoordinator(DataUpdateCoordinator[None]):
+    """Polls one fixed group of endpoints on its own interval.
+
+    Results are applied to the hub rather than kept here, so every entity sees
+    the whole vehicle snapshot regardless of which tier refreshed it.
+    """
+
+    def __init__(
+        self,
+        hub: PolestarCoordinator,
+        tier: str,
+        attrs: Sequence[str],
+        update_interval: timedelta,
+    ) -> None:
+        super().__init__(
+            hub.hass,
+            _LOGGER,
+            name=f"Polestar {hub.vehicle.vin} {tier}",
+            update_interval=update_interval,
+            config_entry=hub.config_entry,
+        )
+        self.hub = hub
+        self.tier = tier
+        self.attrs = tuple(attrs)
+        self._poll_count = 0
+
+    async def _async_update_data(self) -> None:
+        """Poll this tier's endpoints and merge the results into the hub."""
+        self._poll_count += 1
+        values, successful, attempted = await self.hub.async_fetch_values(
+            self.attrs,
+            probe_unsupported=self._poll_count % _UNSUPPORTED_REPROBE_CYCLES == 1,
+        )
+
+        self.hub.async_apply_values(values)
+
+        if attempted and successful == 0:
+            raise UpdateFailed(
+                f"All {attempted} {self.tier}-tier API calls failed for {self.hub.vehicle.vin}"
+            )
+
+        if self.tier == TIER_FAST:
+            self.hub.async_restart_finished_streams()
+
 
 @dataclass
 class PolestarRuntimeData:
@@ -904,6 +1108,7 @@ class PolestarRuntimeData:
 
     api: PolestarApi | None
     coordinators: dict[str, PolestarCoordinator]
+    tiers: list[PolestarTierCoordinator] = field(default_factory=list)
 
 
 type PolestarConfigEntry = ConfigEntry[PolestarRuntimeData]

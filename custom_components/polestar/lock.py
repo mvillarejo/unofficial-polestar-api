@@ -5,24 +5,24 @@ from __future__ import annotations
 from typing import Any
 
 from homeassistant.components.lock import LockEntity
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN
+from .coordinator import PolestarConfigEntry
 from .entity import PolestarEntity
+
+PARALLEL_UPDATES = 1
 
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: PolestarConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Polestar locks."""
-    data = hass.data[DOMAIN][entry.entry_id]
     entities = [
         PolestarLock(coordinator)
-        for coordinator in data["coordinators"].values()
+        for coordinator in entry.runtime_data.coordinators.values()
     ]
     async_add_entities(entities)
 

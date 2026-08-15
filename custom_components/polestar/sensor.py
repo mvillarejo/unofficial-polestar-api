@@ -12,7 +12,6 @@ from homeassistant.components.sensor import (
     SensorEntityDescription,
     SensorStateClass,
 )
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     PERCENTAGE,
     UnitOfElectricCurrent,
@@ -52,10 +51,11 @@ from polestar_api.models.health import (
 from polestar_api.models.ota import SoftwareState
 from polestar_api.models.precleaning import PreCleaningErrorType, PreCleaningStartReason
 
-from .const import DOMAIN
-from .coordinator import PolestarVehicleData
+from .coordinator import PolestarConfigEntry, PolestarVehicleData
 from .entity import PolestarEntity
 from .utils import enum_name, enum_options, serialize_charge_location
+
+PARALLEL_UPDATES = 0
 
 
 def _safe(fn: Callable[[PolestarVehicleData], Any], data: PolestarVehicleData) -> Any:
@@ -79,6 +79,46 @@ def _climate_time_remaining(data: PolestarVehicleData) -> int | None:
         return None
     remaining = data.climate.remaining_minutes()
     return data.climate.time_remaining if remaining is None else remaining
+
+
+# Usable capacity, kWh. The API never reports this, so approximate per model
+# (matched against Vehicle.model_name, e.g. "Polestar 4") and fall back to the
+# Polestar 4 figure, the only model exercised against this repo's live tests.
+BATTERY_CAPACITY_KWH_BY_MODEL: dict[str, float] = {
+    "polestar 2": 79.0,
+    "polestar 3": 105.0,
+    "polestar 4": 94.0,
+}
+DEFAULT_BATTERY_CAPACITY_KWH = 94.0
+
+# (key, name, assumed power in kW) for the "time to reach target SOC" sensors below.
+# Names are kept short and punctuation-free so the generated entity_id matches the key.
+CHARGING_TIME_TIERS: tuple[tuple[str, str, float], ...] = (
+    ("charging_time_domestic_power", "Charging time domestic power", 7.0),
+    ("charging_time_low_power", "Charging time low power", 22.0),
+    ("charging_time_fast_power", "Charging time fast power", 100.0),
+    ("charging_time_ultrafast_power", "Charging time ultrafast power", 300.0),
+)
+
+
+def _battery_capacity_kwh(model_name: str | None) -> float:
+    if model_name:
+        name = model_name.casefold()
+        for key, capacity in BATTERY_CAPACITY_KWH_BY_MODEL.items():
+            if key in name:
+                return capacity
+    return DEFAULT_BATTERY_CAPACITY_KWH
+
+
+def _energy_needed_kwh(data: PolestarVehicleData, capacity_kwh: float) -> float | None:
+    """Energy needed to reach target SOC, estimated from usable capacity and current/target charge levels."""
+    if data.battery is None or data.target_soc is None:
+        return None
+    current = data.battery.charge_level
+    target = data.target_soc.target_level
+    if target <= current:
+        return None
+    return capacity_kwh * (target - current) / 100
 
 
 def _current_charge_location_state(data: PolestarVehicleData) -> str | None:
@@ -578,15 +618,16 @@ SENSORS: tuple[PolestarSensorDescription, ...] = (
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: PolestarConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Polestar sensors."""
-    data = hass.data[DOMAIN][entry.entry_id]
     entities = []
-    for coordinator in data["coordinators"].values():
+    for coordinator in entry.runtime_data.coordinators.values():
         for desc in SENSORS:
             entities.append(PolestarSensor(coordinator, desc))
+        for key, name, power_kw in CHARGING_TIME_TIERS:
+            entities.append(PolestarChargingTimeSensor(coordinator, key, name, power_kw))
     async_add_entities(entities)
 
 
@@ -611,3 +652,40 @@ class PolestarSensor(PolestarEntity, SensorEntity):
         if self.coordinator.data is None or self.entity_description.attrs_fn is None:
             return {}
         return self.entity_description.attrs_fn(self.coordinator.data)
+
+
+class PolestarChargingTimeSensor(PolestarEntity, SensorEntity):
+    """Estimated time to reach the target SOC at a fixed assumed charging power.
+
+    Uses the vehicle's usable battery capacity (looked up by model, since the
+    API never reports it) rather than an active charging session, so it has a
+    value whether or not the car is currently plugged in.
+    """
+
+    _attr_device_class = SensorDeviceClass.DURATION
+    _attr_native_unit_of_measurement = UnitOfTime.MINUTES
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:ev-station"
+
+    def __init__(self, coordinator, key: str, name: str, power_kw: float) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{self._vehicle.vin}_{key}"
+        self._attr_name = name
+        self._power_kw = power_kw
+
+    @property
+    def native_value(self) -> StateType | None:
+        if self.coordinator.data is None:
+            return None
+        capacity_kwh = _battery_capacity_kwh(self._vehicle.model_name)
+        energy_kwh = _safe(lambda d: _energy_needed_kwh(d, capacity_kwh), self.coordinator.data)
+        if energy_kwh is None:
+            return None
+        return round(energy_kwh / self._power_kw * 60)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {
+            "assumed_power_kw": self._power_kw,
+            "assumed_battery_capacity_kwh": _battery_capacity_kwh(self._vehicle.model_name),
+        }

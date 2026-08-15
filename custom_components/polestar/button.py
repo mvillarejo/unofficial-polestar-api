@@ -7,14 +7,15 @@ from dataclasses import dataclass
 from typing import Any
 
 from homeassistant.components.button import ButtonEntity, ButtonEntityDescription
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from polestar_api.models.honkflash import HonkFlashAction
 
-from .const import DOMAIN
+from .coordinator import PolestarConfigEntry
 from .entity import PolestarEntity
+
+PARALLEL_UPDATES = 1
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -91,13 +92,12 @@ BUTTONS: tuple[PolestarButtonDescription, ...] = (
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: PolestarConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Polestar buttons."""
-    data = hass.data[DOMAIN][entry.entry_id]
     entities = []
-    for coordinator in data["coordinators"].values():
+    for coordinator in entry.runtime_data.coordinators.values():
         for desc in BUTTONS:
             entities.append(PolestarButton(coordinator, desc))
     async_add_entities(entities)

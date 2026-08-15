@@ -5,14 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 
 from homeassistant.components.select import SelectEntity, SelectEntityDescription
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
-from .const import DOMAIN
-from .coordinator import PolestarCoordinator
+from .coordinator import PolestarConfigEntry, PolestarCoordinator
 from .entity import OptimisticStateMixin, PolestarEntity
 from polestar_api.models.charging import ChargeTargetLevelSettingType
 from polestar_api.models.climatization import HeatingIntensity
@@ -21,6 +19,8 @@ from polestar_api.models.parking_climate_timer import (
     ParkingClimateTimerSettings,
     SeatHeatingSettings,
 )
+
+PARALLEL_UPDATES = 1
 
 _HEATING_OPTIONS = ["unspecified", "off", "level1", "level2", "level3"]
 _HEATING_MAP = {
@@ -137,13 +137,12 @@ TIMER_SETTINGS_SELECTS: tuple[PolestarSelectDescription, ...] = (
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: PolestarConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Polestar select entities."""
-    data = hass.data[DOMAIN][entry.entry_id]
     entities = []
-    for coordinator in data["coordinators"].values():
+    for coordinator in entry.runtime_data.coordinators.values():
         for description in SELECTS:
             entities.append(PolestarSelect(coordinator, description))
         for description in TIMER_SETTINGS_SELECTS:

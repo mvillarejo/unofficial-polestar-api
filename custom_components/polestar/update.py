@@ -8,17 +8,17 @@ from homeassistant.components.update import (
     UpdateEntityDescription,
     UpdateEntityFeature,
 )
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
-from .const import DOMAIN
-from .coordinator import PolestarCoordinator
+from .coordinator import PolestarConfigEntry, PolestarCoordinator
 from .entity import PolestarEntity
 from polestar_api.models.ota import SoftwareState
 from .utils import enum_name, timestamp_to_iso
+
+PARALLEL_UPDATES = 1
 
 _IN_PROGRESS_STATES = {
     SoftwareState.DOWNLOAD_STARTED,
@@ -32,14 +32,13 @@ _IN_PROGRESS_STATES = {
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: PolestarConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Polestar update entities."""
-    data = hass.data[DOMAIN][entry.entry_id]
     entities = [
         PolestarOtaUpdate(coordinator)
-        for coordinator in data["coordinators"].values()
+        for coordinator in entry.runtime_data.coordinators.values()
     ]
     async_add_entities(entities)
 

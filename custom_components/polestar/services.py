@@ -6,6 +6,7 @@ from typing import Any
 
 import voluptuous as vol
 
+from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import config_validation as cv, entity_registry as er
@@ -172,20 +173,13 @@ def async_register_services(hass: HomeAssistant) -> None:
     )
 
 
-def async_unregister_services(hass: HomeAssistant) -> None:
-    """Unregister Polestar services when the last entry unloads."""
-    for service_name in SERVICE_SCHEMAS:
-        if hass.services.has_service(DOMAIN, service_name):
-            hass.services.async_remove(DOMAIN, service_name)
-
-
 def _iter_coordinators(hass: HomeAssistant) -> list[PolestarCoordinator]:
-    """Return all active coordinators."""
+    """Return the coordinators of every loaded Polestar config entry."""
     coordinators: list[PolestarCoordinator] = []
-    for value in hass.data.get(DOMAIN, {}).values():
-        if not isinstance(value, dict):
+    for entry in hass.config_entries.async_entries(DOMAIN):
+        if entry.state is not ConfigEntryState.LOADED:
             continue
-        coordinators.extend(value.get("coordinators", {}).values())
+        coordinators.extend(entry.runtime_data.coordinators.values())
     return coordinators
 
 
@@ -219,6 +213,9 @@ def _resolve_coordinator(hass: HomeAssistant, data: dict[str, Any]) -> PolestarC
     """Resolve a coordinator from service target data."""
     vin = data.get(ATTR_VIN)
     entity_id = _resolve_entity_id(data.get(ATTR_ENTITY_ID))
+
+    if not _iter_coordinators(hass):
+        raise ServiceValidationError("No Polestar config entry is loaded")
 
     if vin:
         for coordinator in _iter_coordinators(hass):

@@ -7,14 +7,14 @@ from dataclasses import dataclass
 from typing import Any
 
 from homeassistant.components.switch import SwitchEntity, SwitchEntityDescription
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN
-from .coordinator import PolestarCoordinator, PolestarVehicleData
+from .coordinator import PolestarConfigEntry, PolestarCoordinator, PolestarVehicleData
 from .entity import OptimisticStateMixin, PolestarEntity
+
+PARALLEL_UPDATES = 1
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -70,13 +70,12 @@ SWITCHES: tuple[PolestarSwitchDescription, ...] = (
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: PolestarConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Polestar switches."""
-    data = hass.data[DOMAIN][entry.entry_id]
     entities = []
-    for coordinator in data["coordinators"].values():
+    for coordinator in entry.runtime_data.coordinators.values():
         for desc in SWITCHES:
             entities.append(PolestarSwitch(coordinator, desc))
     async_add_entities(entities)

@@ -5,6 +5,9 @@
         "data": {
           "update_interval": "Polling interval (seconds)"
         },
+        "data_description": {
+          "update_interval": "How often to poll the Polestar cloud for the data that is not pushed live (60-86400 seconds)."
+        },
         "description": "How often to poll the Polestar cloud for updates. Lower values give faster updates but may increase server load and 12v battery usage."
       }
     }
@@ -17,6 +20,11 @@
           "email": "Email",
           "password": "Password",
           "demo": "Demo mode (fake vehicle, no API connection)"
+        },
+        "data_description": {
+          "email": "The email address of your Polestar account.",
+          "password": "The password of your Polestar account.",
+          "demo": "Create a fake vehicle with sample data instead of connecting to Polestar."
         }
       },
       "vehicle": {
@@ -25,6 +33,10 @@
         "data": {
           "vin": "Vehicle",
           "update_interval": "Polling interval (seconds)"
+        },
+        "data_description": {
+          "vin": "The vehicle to add. Pick the last option if your car is missing.",
+          "update_interval": "How often to poll the Polestar cloud for the data that is not pushed live (60-86400 seconds)."
         }
       },
       "guest_vin": {
@@ -33,12 +45,19 @@
         "data": {
           "vin": "VIN (Vehicle Identification Number)",
           "update_interval": "Polling interval (seconds)"
+        },
+        "data_description": {
+          "vin": "The 17-character VIN of the vehicle you have access to.",
+          "update_interval": "How often to poll the Polestar cloud for the data that is not pushed live (60-86400 seconds)."
         }
       },
       "demo_vin": {
         "title": "Demo vehicle VIN",
         "data": {
           "vin": "VIN (Vehicle Identification Number)"
+        },
+        "data_description": {
+          "vin": "Any 17-character identifier for the fake demo vehicle."
         }
       },
       "reauth_confirm": {
@@ -46,6 +65,9 @@
         "description": "Your session has expired. Please enter your password to reconnect.",
         "data": {
           "password": "Password"
+        },
+        "data_description": {
+          "password": "The current password of your Polestar account."
         }
       }
     },

@@ -16,6 +16,28 @@ Then add the integration via **Settings → Devices & Services → Add Integrati
 - **Secondary / guest accounts** (no vehicles listed): choose **"My vehicle is not listed"** and enter the VIN (Vehicle Identification Number) manually.
 - **Demo mode:** tick **Demo mode** on the first step and enter any VIN to get a fake vehicle with static data (no API connection needed).
 
+### Setup parameters
+
+| Step | Field | Required | Description |
+|------|-------|----------|-------------|
+| Credentials | **Email** | Yes | The email address of your Polestar account. |
+| Credentials | **Password** | Yes | The password of your Polestar account. |
+| Credentials | **Demo mode** | No (default off) | Create a fake vehicle with sample data instead of connecting to Polestar. |
+| Select your vehicle | **Vehicle** | Yes | The car to add, picked from the ones found on the account. Pick the last option if your car is missing. |
+| Select your vehicle | **Polling interval** | No (default 600) | Seconds between polls of the data that is not pushed live, 60–86400. |
+| Enter VIN manually | **VIN** | Yes | The 17-character VIN of the vehicle you have access to. Shown when the account lists no vehicles, or when you pick "My vehicle is not listed". |
+| Enter VIN manually | **Polling interval** | No (default 600) | Seconds between polls of the data that is not pushed live, 60–86400. |
+| Demo vehicle VIN | **VIN** | Yes | Any 17-character identifier for the fake demo vehicle. Shown only in demo mode. |
+
+The vehicle picker and the manual VIN step are alternatives — you see one or the other, never both. Re-authentication later asks for the **Password** only. The polling interval is the only setting you can change after setup, under [Update interval](#update-interval).
+
+## Remove
+
+1. Go to **Settings → Devices & Services → Polestar**
+2. Click **⋮** on the vehicle entry you want to remove and choose **Delete**
+
+Deleting the entry removes its device, entities, and the stored session tokens. To remove the integration itself, delete every entry first, then uninstall **Unofficial Polestar** from HACS and restart Home Assistant.
+
 ## Entities
 
 Each vehicle gets ~106 entities when all features are available:

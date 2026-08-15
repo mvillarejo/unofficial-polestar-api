@@ -6,14 +6,14 @@ from dataclasses import dataclass
 from datetime import time as dt_time
 
 from homeassistant.components.time import TimeEntity, TimeEntityDescription
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN
-from .coordinator import PolestarCoordinator
+from .coordinator import PolestarConfigEntry, PolestarCoordinator
 from .entity import OptimisticStateMixin, PolestarEntity
+
+PARALLEL_UPDATES = 1
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -43,13 +43,12 @@ TIMES: tuple[PolestarTimeDescription, ...] = (
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: PolestarConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Polestar time entities."""
-    data = hass.data[DOMAIN][entry.entry_id]
     entities = []
-    for coordinator in data["coordinators"].values():
+    for coordinator in entry.runtime_data.coordinators.values():
         for description in TIMES:
             entities.append(PolestarChargeTimerTime(coordinator, description))
     async_add_entities(entities)

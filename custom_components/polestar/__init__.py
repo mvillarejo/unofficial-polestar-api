@@ -6,24 +6,33 @@ import logging
 from pathlib import Path
 
 from homeassistant.components.http import StaticPathConfig
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.typing import ConfigType
 
 from .const import CONF_DEMO, CONF_VIN, DOMAIN, PLATFORMS
-from .coordinator import PolestarCoordinator
+from .coordinator import PolestarConfigEntry, PolestarCoordinator, PolestarRuntimeData
 from .demo import DemoVehicle
 from polestar_api import PolestarApi, Vehicle
 from polestar_api.exceptions import AuthError
-from .services import async_register_services, async_unregister_services
+from .services import async_register_services
 from .token_store import HassTokenStore
 
 _LOGGER = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).parent / "static"
 
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Register Polestar services independently of any config entry."""
+    async_register_services(hass)
+    return True
+
+
+async def async_setup_entry(hass: HomeAssistant, entry: PolestarConfigEntry) -> bool:
     """Set up Polestar from a config entry."""
     if entry.data.get(CONF_DEMO):
         return await _async_setup_demo(hass, entry)
@@ -41,9 +50,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except AuthError as err:
         await api.close()
         raise ConfigEntryAuthFailed(str(err)) from err
-    except Exception:
+    except Exception as err:
         await api.close()
-        raise
+        raise ConfigEntryNotReady(str(err)) from err
 
     vehicle = next((v for v in vehicles if v.vin == configured_vin), None)
 
@@ -60,40 +69,34 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator = PolestarCoordinator(hass, vehicle, entry)
     await coordinator.async_config_entry_first_refresh()
     await coordinator.async_start_streams()
-    coordinators: dict[str, PolestarCoordinator] = {vehicle.vin: coordinator}
+    entry.runtime_data = PolestarRuntimeData(
+        api=api,
+        coordinators={vehicle.vin: coordinator},
+    )
 
-    hass.data.setdefault(DOMAIN, {})
-    hass.data[DOMAIN][entry.entry_id] = {
-        "api": api,
-        "coordinators": coordinators,
-    }
-
-    async_register_services(hass)
     await _async_register_static_path(hass)
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 
-async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
+async def _async_options_updated(hass: HomeAssistant, entry: PolestarConfigEntry) -> None:
     """Reload integration when options change."""
     await hass.config_entries.async_reload(entry.entry_id)
 
 
-async def _async_setup_demo(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+async def _async_setup_demo(hass: HomeAssistant, entry: PolestarConfigEntry) -> bool:
     """Set up a demo vehicle with fake data."""
     vehicle = DemoVehicle()
     coordinator = PolestarCoordinator(hass, vehicle, entry)
     await coordinator.async_config_entry_first_refresh()
     await coordinator.async_start_streams()
 
-    hass.data.setdefault(DOMAIN, {})
-    hass.data[DOMAIN][entry.entry_id] = {
-        "api": None,
-        "coordinators": {vehicle.vin: coordinator},
-    }
+    entry.runtime_data = PolestarRuntimeData(
+        api=None,
+        coordinators={vehicle.vin: coordinator},
+    )
 
-    async_register_services(hass)
     await _async_register_static_path(hass)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
@@ -110,20 +113,18 @@ async def _async_register_static_path(hass: HomeAssistant) -> None:
     hass.data[key] = True
 
 
-async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+async def async_unload_entry(hass: HomeAssistant, entry: PolestarConfigEntry) -> bool:
     """Unload a config entry."""
     if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
-        data = hass.data[DOMAIN].pop(entry.entry_id)
-        for coordinator in data["coordinators"].values():
+        data = entry.runtime_data
+        for coordinator in data.coordinators.values():
             await coordinator.async_shutdown()
-        if data["api"] is not None:
-            await data["api"].close()
-        if not hass.data[DOMAIN]:
-            async_unregister_services(hass)
+        if data.api is not None:
+            await data.api.close()
     return unload_ok
 
 
-async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+async def async_remove_entry(hass: HomeAssistant, entry: PolestarConfigEntry) -> None:
     """Clean up stored tokens when entry is removed."""
     token_store = HassTokenStore(hass, entry.entry_id)
     await token_store.remove()

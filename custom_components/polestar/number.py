@@ -7,18 +7,18 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from homeassistant.components.number import NumberDeviceClass, NumberEntity, NumberEntityDescription
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import PERCENTAGE, UnitOfElectricCurrent, UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
-from .const import DOMAIN
-from .coordinator import PolestarCoordinator, PolestarVehicleData
+from .coordinator import PolestarConfigEntry, PolestarCoordinator, PolestarVehicleData
 from .entity import OptimisticStateMixin, PolestarEntity
 from polestar_api.models.charging import ChargeTargetLevelSettingType
 from polestar_api.models.parking_climate_timer import ParkingClimateTimerSettings
+
+PARALLEL_UPDATES = 1
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -76,13 +76,12 @@ NUMBERS: tuple[PolestarNumberDescription, ...] = (
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: PolestarConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Polestar number entities."""
-    data = hass.data[DOMAIN][entry.entry_id]
     entities = []
-    for coordinator in data["coordinators"].values():
+    for coordinator in entry.runtime_data.coordinators.values():
         for desc in NUMBERS:
             entities.append(PolestarNumber(coordinator, desc))
         entities.append(PolestarTimerTemperatureNumber(coordinator))

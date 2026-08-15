@@ -11,16 +11,16 @@ from homeassistant.components.binary_sensor import (
     BinarySensorEntity,
     BinarySensorEntityDescription,
 )
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from polestar_api.models.exterior import OpenStatus
 from polestar_api.models.health import LowVoltageBatteryWarning, ServiceWarning
 
-from .const import DOMAIN
-from .coordinator import PolestarVehicleData
+from .coordinator import PolestarConfigEntry, PolestarVehicleData
 from .entity import PolestarEntity
+
+PARALLEL_UPDATES = 0
 
 
 def _safe(fn: Callable[[PolestarVehicleData], Any], data: PolestarVehicleData) -> bool | None:
@@ -199,13 +199,12 @@ BINARY_SENSORS: tuple[PolestarBinarySensorDescription, ...] = (
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: PolestarConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Polestar binary sensors."""
-    data = hass.data[DOMAIN][entry.entry_id]
     entities = []
-    for coordinator in data["coordinators"].values():
+    for coordinator in entry.runtime_data.coordinators.values():
         for desc in BINARY_SENSORS:
             entities.append(PolestarBinarySensor(coordinator, desc))
     async_add_entities(entities)

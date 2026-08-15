@@ -36,7 +36,7 @@ break.
 
 ## Conventions
 
-- **Python ≥ 3.12**, `from __future__ import annotations` everywhere.
+- **Python ≥ 3.13.2**, `from __future__ import annotations` everywhere.
 - **frozen dataclasses** for all protobuf message types. Mutating state goes
   through `dataclasses.replace(...)` (see `coordinator.py`).
 - **No protoc**. Protobuf schemas live in the `schema={field_num: name, ...}`
@@ -69,10 +69,16 @@ break.
   tests prompt on stdin — never run it unattended. Opt in with
   `uv run pytest tests/test_live_integration.py -m live -s`, and never run its
   `TestLiveWriteCommands` without asking the user first.
-- `custom_components/` is **not importable** in this repo's test env
-  (`homeassistant` isn't a dev dependency), so the HA integration has no unit
-  tests. Verify coordinator/entity changes by reasoning plus a scratchpad script,
-  not by adding a test harness.
+- **Two test trees.** `tests/` covers the library (`src/polestar_api`) and needs
+  only the `dev` extra. `tests_ha/` covers the HA integration via
+  `pytest-homeassistant-custom-component` and needs `uv sync --extra dev --extra ha`.
+  Both run under one `uv run pytest`.
+- `tests_ha/conftest.py` mocks at the `polestar_api.vehicle.Vehicle` facade —
+  the wire format is already the library suite's job. Test entity behaviour
+  through `hass.services.async_call`, not by calling entity methods directly.
+- Entity `unique_id`s are `f"{vin}_{key}"` and are a **compatibility surface**
+  (dashboards, scripts, statistics key off the derived `entity_id`).
+  `tests_ha/test_entity_compat.py` guards them; don't restructure them casually.
 - Known live failure, not a regression: `test_get_charge_locations` returns
   `UNIMPLEMENTED: CHARGE_LOCATION` on Polestar 4.
 - Don't add new live tests without explicit approval — they need real

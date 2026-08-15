@@ -350,7 +350,7 @@ class DemoVehicle:
     async def get_odometer(self):
         from polestar_api.models.odometer import OdometerStatus
 
-        return OdometerStatus(odometer_km=12450.0)
+        return OdometerStatus(odometer_meters=12450000)
 
     async def get_precleaning(self) -> PreCleaningInfo:
         return PreCleaningInfo(

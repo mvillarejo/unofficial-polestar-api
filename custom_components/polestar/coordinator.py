@@ -83,7 +83,12 @@ if TYPE_CHECKING:
     from polestar_api.vehicle import Vehicle
 
 _LOGGER = logging.getLogger(__name__)
-_POST_COMMAND_REFRESH_DELAYS: tuple[int, ...] = (3, 5, 10, 15)
+# Measured against a real car: the cloud reflects a lock/unlock roughly 3-30s
+# after the command is accepted, and a climatisation start can take well over a
+# minute. The old schedule stopped at 33s, so the entity fell back to the
+# pre-command snapshot before the car had reported anything, which is what made
+# a command look like it had been silently undone.
+_POST_COMMAND_REFRESH_DELAYS: tuple[int, ...] = (3, 5, 10, 15, 30, 60)
 # Endpoints that answered UNIMPLEMENTED are skipped on scheduled polls, but
 # re-probed this often in case the backend starts serving them again.
 _UNSUPPORTED_REPROBE_CYCLES = 6
@@ -280,6 +285,8 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
         self._unsupported_streams: set[str] = set()
         self._unsupported_commands: set[str] = set()
         self._unsupported_fetches: set[str] = set()
+        self._generation = 0
+        self._applied_generations: dict[str, int] = {}
 
     # ------------------------------------------------------------------
     # Tier plumbing
@@ -305,12 +312,47 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
             )
         return list(self.tiers.values())
 
-    def async_apply_values(self, values: dict[str, Any]) -> None:
-        """Merge fetched/streamed values into the snapshot and notify entities."""
+    def next_fetch_generation(self) -> int:
+        """Claim the next fetch sequence number.
+
+        Callers take one *before* awaiting their fetch and hand it back to
+        ``async_apply_values``, so results are ordered by when they were asked
+        for rather than by when they happened to come back.
+        """
+        self._generation += 1
+        return self._generation
+
+    def async_apply_values(
+        self, values: dict[str, Any], *, generation: int | None = None
+    ) -> None:
+        """Merge fetched/streamed values into the snapshot and notify entities.
+
+        Tier polls, post-command refreshes and live streams all write here
+        concurrently, and they finish in whatever order the network decides.
+        *generation* is the sequence number claimed when the fetch started; an
+        attribute is only overwritten by a fetch newer than the one that last
+        wrote it, so a slow poll cannot resurrect pre-command state on top of a
+        faster post-command refresh. Streams and other unsequenced callers
+        claim a generation now, which correctly makes them newer than anything
+        still in flight.
+        """
         if not values:
             return
-        self.data = replace(self.data, **values)
-        if "software" in values:
+        if generation is None:
+            generation = self.next_fetch_generation()
+
+        fresh = {
+            attr: value
+            for attr, value in values.items()
+            if generation > self._applied_generations.get(attr, 0)
+        }
+        if not fresh:
+            return
+        for attr in fresh:
+            self._applied_generations[attr] = generation
+
+        self.data = replace(self.data, **fresh)
+        if "software" in fresh:
             self._update_installed_version_cache(self.data.software)
         self.async_update_listeners()
 
@@ -407,12 +449,11 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
 
     async def _async_update_data(self) -> PolestarVehicleData:
         """Refresh every attribute at once (manual refresh, not a timer)."""
+        generation = self.next_fetch_generation()
         values, successful, _ = await self.async_fetch_values(_FETCH_ATTRS)
         if successful == 0:
             raise UpdateFailed("All API calls failed")
-        self.data = replace(self.data, **values)
-        if "software" in values:
-            self._update_installed_version_cache(self.data.software)
+        self.async_apply_values(values, generation=generation)
         return self.data
 
     async def async_request_attrs_refresh(self, *attrs: str) -> None:
@@ -420,9 +461,10 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
         if not attrs:
             await self.async_request_refresh()
             return
+        generation = self.next_fetch_generation()
         values, successful, _ = await self.async_fetch_values(attrs)
         if successful:
-            self.async_apply_values(values)
+            self.async_apply_values(values, generation=generation)
 
     @staticmethod
     def _merge_partial_update(attr: str, previous: Any, result: Any) -> Any:
@@ -583,6 +625,12 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
     @staticmethod
     def _command_succeeded(response: Any) -> bool:
         """Interpret common command response types."""
+        # CarLockResponse carries its own failure code alongside a generic
+        # invocation status that still reads as success — the car refusing to
+        # lock because a door is ajar shows up only here.
+        if getattr(response, "lock_error", 0):
+            return False
+
         invocation = getattr(response, "response", None)
         if invocation is not None:
             return invocation.status in _COMMAND_INVOCATION_SUCCESS
@@ -603,6 +651,10 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
     @staticmethod
     def _command_error_message(response: Any, fallback: str) -> str:
         """Build a useful error message from the command response."""
+        lock_error = getattr(response, "lock_error", 0)
+        if lock_error:
+            return f"{fallback} (lock error {lock_error})"
+
         invocation = getattr(response, "response", None)
         if invocation is not None:
             if invocation.message:
@@ -1086,12 +1138,13 @@ class PolestarTierCoordinator(DataUpdateCoordinator[None]):
     async def _async_update_data(self) -> None:
         """Poll this tier's endpoints and merge the results into the hub."""
         self._poll_count += 1
+        generation = self.hub.next_fetch_generation()
         values, successful, attempted = await self.hub.async_fetch_values(
             self.attrs,
             probe_unsupported=self._poll_count % _UNSUPPORTED_REPROBE_CYCLES == 1,
         )
 
-        self.hub.async_apply_values(values)
+        self.hub.async_apply_values(values, generation=generation)
 
         if attempted and successful == 0:
             raise UpdateFailed(

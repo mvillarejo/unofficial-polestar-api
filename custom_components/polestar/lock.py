@@ -9,7 +9,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .coordinator import PolestarConfigEntry
-from .entity import PolestarEntity
+from .entity import OptimisticStateMixin, PolestarEntity
 
 PARALLEL_UPDATES = 1
 
@@ -27,12 +27,16 @@ async def async_setup_entry(
     async_add_entities(entities)
 
 
-class PolestarLock(PolestarEntity, LockEntity):
+class PolestarLock(OptimisticStateMixin, PolestarEntity, LockEntity):
     """Polestar central lock."""
 
     _attr_name = "Lock"
     _attr_is_locking: bool = False
     _attr_is_unlocking: bool = False
+
+    # The car confirms a lock or unlock somewhere between 3 and 30 seconds
+    # after accepting it, so hold the shown value comfortably past that.
+    _OPTIMISTIC_TTL = 60.0
 
     def __init__(self, coordinator) -> None:
         super().__init__(coordinator)
@@ -41,7 +45,7 @@ class PolestarLock(PolestarEntity, LockEntity):
     @property
     def is_locked(self) -> bool | None:
         if self.coordinator.data and self.coordinator.data.exterior:
-            return self.coordinator.data.exterior.is_locked
+            return self._resolve_optimistic(self.coordinator.data.exterior.is_locked)
         return None
 
     async def async_lock(self, **kwargs: Any) -> None:
@@ -56,6 +60,7 @@ class PolestarLock(PolestarEntity, LockEntity):
         finally:
             self._attr_is_locking = False
             self.async_write_ha_state()
+        self._set_optimistic(True)
         # Fallback refresh in background — exterior stream will usually
         # push the update before this fires.
         self.coordinator.async_refresh_exterior_after_command()
@@ -72,4 +77,5 @@ class PolestarLock(PolestarEntity, LockEntity):
         finally:
             self._attr_is_unlocking = False
             self.async_write_ha_state()
+        self._set_optimistic(False)
         self.coordinator.async_refresh_exterior_after_command()

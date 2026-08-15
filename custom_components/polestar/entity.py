@@ -24,6 +24,13 @@ class OptimisticStateMixin:
     instead of the raw coordinator value. The override is dropped as soon as
     the coordinator reports a matching value, or after `_OPTIMISTIC_TTL`
     seconds if the backend never confirms it.
+
+    The TTL has to outlast the car, not the network. Measured against a real
+    car, a lock or unlock shows up in roughly 3-30s but a climatisation start
+    can take over a minute, so an entity whose command is slow to land raises
+    ``_OPTIMISTIC_TTL``. Too short a TTL is what made a command look undone:
+    the override expired, the entity fell back to the pre-command snapshot,
+    and only a later poll put it back.
     """
 
     _OPTIMISTIC_TTL = 30.0

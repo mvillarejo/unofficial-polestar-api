@@ -86,6 +86,11 @@ class PolestarSwitch(OptimisticStateMixin, PolestarEntity, SwitchEntity):
 
     entity_description: PolestarSwitchDescription
 
+    # Climatisation and pre-cleaning starts routinely take longer than a
+    # minute to be reported back, so hold the shown value across the whole
+    # post-command refresh window rather than half of it.
+    _OPTIMISTIC_TTL = 130.0
+
     def __init__(self, coordinator, description: PolestarSwitchDescription) -> None:
         super().__init__(coordinator)
         self.entity_description = description

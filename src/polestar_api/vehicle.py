@@ -236,6 +236,11 @@ class Vehicle:
         """Set the charge target level (0-100%)."""
         return await self._target_soc.set(level, setting_type)
 
+    async def stream_target_soc(self) -> AsyncIterator[TargetSocResponse]:
+        """Live charge target level updates."""
+        async for status in self._target_soc.stream():
+            yield status
+
     async def get_amp_limit(self) -> AmpLimitResponse:
         """Get the charging amperage limit."""
         return await self._amp_limit.get()
@@ -244,6 +249,11 @@ class Vehicle:
         """Set the charging amperage limit."""
         return await self._amp_limit.set(amperage)
 
+    async def stream_amp_limit(self) -> AsyncIterator[AmpLimitResponse]:
+        """Live charging amperage limit updates."""
+        async for status in self._amp_limit.stream():
+            yield status
+
     async def get_charge_timer(self) -> ChargeTimerResponse:
         """Get the scheduled charge timer."""
         return await self._charge_timer.get()
@@ -251,6 +261,11 @@ class Vehicle:
     async def set_charge_timer(self, timer: BatteryChargeTimer) -> ChargeTimerResponse:
         """Set a scheduled charge timer."""
         return await self._charge_timer.set(timer)
+
+    async def stream_charge_timer(self) -> AsyncIterator[ChargeTimerResponse]:
+        """Live scheduled charge timer updates."""
+        async for status in self._charge_timer.stream():
+            yield status
 
     # -- Wake-up --
 
@@ -268,6 +283,11 @@ class Vehicle:
         reported by the backend and will be their default (UNSPECIFIED/0).
         """
         return await self._health.get_latest()
+
+    async def stream_health(self) -> AsyncIterator[Health]:
+        """Live vehicle health updates (tyre pressures, service warnings)."""
+        async for status in self._health.stream():
+            yield status
 
     # -- Availability --
 
@@ -353,9 +373,19 @@ class Vehicle:
         """
         return await self._ota.get_software_info()
 
+    async def stream_software_info(self) -> AsyncIterator[CarSoftwareInfo]:
+        """Live software version and update state changes."""
+        async for info in self._ota.stream_software_info():
+            yield info
+
     async def get_ota_schedule(self) -> Scheduler | None:
         """Scheduled OTA update info."""
         return await self._ota.get_schedule()
+
+    async def stream_ota_schedule(self) -> AsyncIterator[Scheduler]:
+        """Live scheduled OTA update changes."""
+        async for schedule in self._ota.stream_schedule():
+            yield schedule
 
     async def schedule_ota(self, software_id: str, relative_time: int = 0) -> Scheduler | None:
         """Schedule an OTA update. relative_time is seconds from now."""
@@ -375,6 +405,11 @@ class Vehicle:
         """Get all scheduled parking climate timers."""
         return await self._parking_climate_timer.get_timers()
 
+    async def stream_climate_timers(self) -> AsyncIterator[list[ParkingClimateTimer]]:
+        """Live scheduled parking climate timer updates."""
+        async for timers in self._parking_climate_timer.stream_timers():
+            yield timers
+
     async def set_climate_timer(self, timer: ParkingClimateTimer) -> int:
         """Create or update a scheduled parking climate timer."""
         return await self._parking_climate_timer.set_timer(timer)
@@ -386,6 +421,11 @@ class Vehicle:
     async def get_climate_timer_settings(self) -> ParkingClimateTimerSettings:
         """Get the default climate settings applied when a parking climate timer fires."""
         return await self._parking_climate_timer.get_timer_settings()
+
+    async def stream_climate_timer_settings(self) -> AsyncIterator[ParkingClimateTimerSettings]:
+        """Live default parking climate timer setting updates."""
+        async for settings in self._parking_climate_timer.stream_timer_settings():
+            yield settings
 
     async def set_climate_timer_settings(self, settings: ParkingClimateTimerSettings) -> int:
         """Set the default climate settings for parking climate timers."""

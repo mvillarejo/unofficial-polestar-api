@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
 from .. import grpc as grpc_call
@@ -50,3 +51,16 @@ class HealthServiceClient:
         if raw.get("health"):
             return Health.from_bytes(raw["health"])
         return None
+
+    async def stream(self) -> AsyncIterator[Health]:
+        """Stream health status updates."""
+        metadata = await self._connection.get_metadata(self._vin)
+        async for data in grpc_call.unary_stream(
+            self._connection.channel,
+            f"{self._svc}/GetHealth",
+            _health_request(self._vin),
+            metadata=metadata,
+        ):
+            raw = decode(data, _RESPONSE_SCHEMA)
+            if raw.get("health"):
+                yield Health.from_bytes(raw["health"])

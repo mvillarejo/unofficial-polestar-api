@@ -59,6 +59,23 @@ class OtaServiceClient:
             pass
         return None
 
+    async def stream_software_info(self) -> AsyncIterator[CarSoftwareInfo]:
+        """Stream software update info."""
+        req = encode(
+            {"vin": (1, "string"), "locale": (2, "string")},
+            {"vin": self._vin, "locale": "en"},
+        )
+        metadata = await self._metadata()
+        async for data in grpc_call.unary_stream(
+            self._connection.channel,
+            f"{self._discovery}/GetSoftwareInfo",
+            req,
+            metadata=metadata,
+        ):
+            raw = decode(data, {1: ("info", "message")})
+            if raw.get("info"):
+                yield CarSoftwareInfo.from_bytes(raw["info"])
+
     async def get_schedule(self) -> Scheduler | None:
         """Get the current OTA schedule from the first stream message, or ``None`` if missing."""
         metadata = await self._metadata()
@@ -76,6 +93,19 @@ class OtaServiceClient:
         except TimeoutError:
             pass
         return None
+
+    async def stream_schedule(self) -> AsyncIterator[Scheduler]:
+        """Stream OTA schedule updates."""
+        metadata = await self._metadata()
+        async for data in grpc_call.unary_stream(
+            self._connection.channel,
+            f"{self._scheduler}/GetSchedule",
+            self._vin_bytes(),
+            metadata=metadata,
+        ):
+            raw = decode(data, {1: ("timer", "message")})
+            if raw.get("timer"):
+                yield Scheduler.from_bytes(raw["timer"])
 
     async def schedule(self, software_id: str, relative_time: int = 0) -> Scheduler | None:
         """Schedule an OTA install. relative_time is seconds from now."""

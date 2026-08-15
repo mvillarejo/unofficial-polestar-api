@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
 from .. import grpc as grpc_call
@@ -26,14 +27,14 @@ class AmpLimitServiceClient:
         return self._connection.backend.amp_limit_svc
 
     @staticmethod
-    def _parse(data: bytes) -> AmpLimitResponse:
-        """Unwrap chronos envelope and parse the amp limit payload."""
+    def _parse(data: bytes) -> AmpLimitResponse | None:
+        """Unwrap chronos envelope and parse the amp limit payload, or ``None`` if absent."""
         raw = decode(data)
         payload = raw.get(3)
         if isinstance(payload, bytes):
             inner = decode(payload)
             return AmpLimitResponse(amperage_limit=int(inner.get(1, 0) or 0))
-        return AmpLimitResponse()
+        return None
 
     async def get(self) -> AmpLimitResponse:
         metadata = await self._connection.get_metadata(self._vin)
@@ -50,7 +51,19 @@ class AmpLimitServiceClient:
             pass
         if data is None:
             return AmpLimitResponse()
-        return self._parse(data)
+        return self._parse(data) or AmpLimitResponse()
+
+    async def stream(self) -> AsyncIterator[AmpLimitResponse]:
+        """Stream charging amperage limit updates."""
+        metadata = await self._connection.get_metadata(self._vin)
+        metadata["vin"] = self._vin
+        async for data in grpc_call.unary_stream(
+            self._connection.channel, f"{self._svc}/GetAmpLimit",
+            wrap_chronos(self._vin), metadata=metadata,
+        ):
+            parsed = self._parse(data)
+            if parsed is not None:
+                yield parsed
 
     async def set(self, amperage: int) -> AmpLimitResponse:
         # APK: REQUEST=1 (ChronosRequest), AMP_LIMIT=2
@@ -61,4 +74,4 @@ class AmpLimitServiceClient:
             self._connection.channel, f"{self._svc}/SetAmpLimit",
             wrap_chronos(self._vin, payload), metadata=metadata,
         )
-        return self._parse(data)
+        return self._parse(data) or AmpLimitResponse()

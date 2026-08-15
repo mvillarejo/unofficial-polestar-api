@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
 from .. import grpc as grpc_call
@@ -32,13 +33,13 @@ class ChargeTimerServiceClient:
         return self._connection.backend.charge_timer_svc
 
     @staticmethod
-    def _parse(data: bytes) -> ChargeTimerResponse:
+    def _parse(data: bytes) -> ChargeTimerResponse | None:
         """Parse GetGlobalChargeTimerResponse — timer is at field 1 (not enveloped)."""
         raw = decode(data)
         payload = raw.get(1)  # globalChargeTimer
         if isinstance(payload, bytes):
             return ChargeTimerResponse(timer=BatteryChargeTimer.from_bytes(payload))
-        return ChargeTimerResponse()
+        return None
 
     @staticmethod
     def _parse_set(data: bytes) -> ChargeTimerResponse:
@@ -77,7 +78,21 @@ class ChargeTimerServiceClient:
             pass
         if data is None:
             return ChargeTimerResponse()
-        return self._parse(data)
+        return self._parse(data) or ChargeTimerResponse()
+
+    async def stream(self) -> AsyncIterator[ChargeTimerResponse]:
+        """Stream global charge timer updates."""
+        metadata = await self._connection.get_metadata(self._vin)
+        metadata["vin"] = self._vin
+        async for data in grpc_call.unary_stream(
+            self._connection.channel,
+            f"{self._svc}/GetGlobalChargeTimerStream",
+            wrap_chronos(self._vin),
+            metadata=metadata,
+        ):
+            parsed = self._parse(data)
+            if parsed is not None:
+                yield parsed
 
     async def set(self, timer: BatteryChargeTimer) -> ChargeTimerResponse:
         # APK: REQUEST=1 (ChronosRequest), CHARGE_TIMER=2, TIME_IS_UTC0=3

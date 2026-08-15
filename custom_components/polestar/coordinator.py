@@ -65,6 +65,9 @@ _UNSUPPORTED_REPROBE_CYCLES = 6
 # A stream that stops pushing without erroring is indistinguishable from a healthy
 # idle one, so resubscribe after this many poll intervals of silence.
 _STREAM_STALE_POLL_INTERVALS = 3
+# Delay between opening successive stream subscriptions on startup, so ~15 concurrent
+# subscriptions don't all hit the backend in the same instant on every reload.
+_STREAM_START_STAGGER = 0.25
 _COMMAND_INVOCATION_SUCCESS = {
     InvocationStatus.SENT,
     InvocationStatus.DELIVERED,
@@ -410,19 +413,36 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
         "exterior": "stream_exterior",
         "precleaning": "stream_precleaning",
         "odometer": "stream_odometer",
+        "health": "stream_health",
+        "target_soc": "stream_target_soc",
+        "amp_limit": "stream_amp_limit",
+        "charge_timer": "stream_charge_timer",
+        "software": "stream_software_info",
+        "ota_schedule": "stream_ota_schedule",
+        "climate_timers": "stream_climate_timers",
+        "climate_timer_settings": "stream_climate_timer_settings",
     }
 
     async def async_start_streams(self) -> None:
-        """Start background stream tasks for live battery/location/exterior/climate updates."""
+        """Start background stream tasks for live battery/location/exterior/climate updates.
+
+        Staggered rather than fired in one batch, so 15 subscriptions don't open against
+        the backend within the same tick on every reload.
+        """
         if self._stream_tasks:
             return
+        first = True
         for attr, method_name in self._STREAMS.items():
             method = getattr(self.vehicle, method_name, None)
-            if method is not None:
-                self._stream_tasks[attr] = asyncio.create_task(
-                    self._async_run_stream(attr, method),
-                    name=f"polestar-{self.vehicle.vin}-{attr}-stream",
-                )
+            if method is None:
+                continue
+            if not first:
+                await asyncio.sleep(_STREAM_START_STAGGER)
+            first = False
+            self._stream_tasks[attr] = asyncio.create_task(
+                self._async_run_stream(attr, method),
+                name=f"polestar-{self.vehicle.vin}-{attr}-stream",
+            )
 
     async def _restart_dead_streams(self) -> None:
         """Restart streams that gave up or went silent, after a poll proves connectivity."""
@@ -484,6 +504,8 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
                     self._stream_last_data[attr] = time.monotonic()
                     current = self.data or PolestarVehicleData()
                     merged_value = self._merge_partial_update(attr, getattr(current, attr), value)
+                    if attr == "software":
+                        self._update_installed_version_cache(merged_value)
                     self._async_push_partial_update(replace(current, **{attr: merged_value}))
                 if received:
                     # Server closed a subscription after delivering data (normal

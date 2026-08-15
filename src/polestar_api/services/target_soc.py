@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
 from .. import grpc as grpc_call
@@ -38,8 +39,8 @@ class TargetSocServiceClient:
         return self._connection.backend.target_soc_svc
 
     @staticmethod
-    def _parse(data: bytes) -> TargetSocResponse:
-        """Parse a GetTargetSoc response (targetSoc message at field 3)."""
+    def _parse(data: bytes) -> TargetSocResponse | None:
+        """Parse a GetTargetSoc response (targetSoc message at field 3), or ``None`` if absent."""
         raw = decode(data)
         payload = raw.get(3)
         if isinstance(payload, bytes):
@@ -53,7 +54,7 @@ class TargetSocServiceClient:
                 target_level=int(inner.get(1, 0) or 0),
                 setting_type=setting_type,
             )
-        return TargetSocResponse()
+        return None
 
     async def get(self) -> TargetSocResponse:
         metadata = await self._connection.get_metadata(self._vin)
@@ -70,7 +71,19 @@ class TargetSocServiceClient:
             pass
         if data is None:
             return TargetSocResponse()
-        return self._parse(data)
+        return self._parse(data) or TargetSocResponse()
+
+    async def stream(self) -> AsyncIterator[TargetSocResponse]:
+        """Stream charge target level updates."""
+        metadata = await self._connection.get_metadata(self._vin)
+        metadata["vin"] = self._vin
+        async for data in grpc_call.unary_stream(
+            self._connection.channel, f"{self._svc}/GetTargetSoc",
+            wrap_chronos(self._vin), metadata=metadata,
+        ):
+            parsed = self._parse(data)
+            if parsed is not None:
+                yield parsed
 
     async def set(
         self,

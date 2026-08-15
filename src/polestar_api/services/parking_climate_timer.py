@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
 from .. import grpc as grpc_call
@@ -288,6 +289,17 @@ class ParkingClimateTimerServiceClient:
             pass
         return []
 
+    async def stream_timers(self) -> AsyncIterator[list[ParkingClimateTimer]]:
+        """Stream the full parking climate timer list on every update."""
+        metadata = await self._metadata()
+        async for data in grpc_call.unary_stream(
+            self._connection.channel,
+            f"{self._svc}/GetTimers",
+            wrap_chronos(self._vin),
+            metadata=metadata,
+        ):
+            yield _merge_timers_response(data)
+
     async def set_timer(self, timer: ParkingClimateTimer) -> int:
         """Create or update a parking climate timer."""
         payload = encode_message(2, _encode_timer(timer))
@@ -341,6 +353,17 @@ class ParkingClimateTimerServiceClient:
         except TimeoutError:
             pass
         return ParkingClimateTimerSettings()
+
+    async def stream_timer_settings(self) -> AsyncIterator[ParkingClimateTimerSettings]:
+        """Stream default parking climate timer settings updates."""
+        metadata = await self._metadata()
+        async for data in grpc_call.unary_stream(
+            self._connection.channel,
+            f"{self._svc}/GetTimerSettings",
+            wrap_chronos(self._vin),
+            metadata=metadata,
+        ):
+            yield _decode_timer_settings_response(data)
 
     async def set_timer_settings(self, settings: ParkingClimateTimerSettings) -> int:
         """Set the default climate settings for parking climate timers."""

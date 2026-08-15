@@ -86,10 +86,13 @@ cards:
         icon: mdi:ev-station
       - type: custom:mushroom-template-card
         primary: |-
-          {% if is_state('device_tracker.polestar_VIN_location','home') %}
+          {% set loc = 'device_tracker.polestar_VIN_location' %}
+          {% if is_state(loc,'home') %}
             En casa
+          {% elif state_attr(loc,'latitude') is none %}
+            Sin datos
           {% else %}
-            {{ distance('device_tracker.polestar_VIN_location', 'zone.home')|round(0) }} km
+            {{ distance(loc, 'zone.home')|round(0) }} km
           {% endif %}
         secondary: Ubicación
         icon: mdi:map-marker

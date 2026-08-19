@@ -148,7 +148,7 @@ async def test_user_override_wins_over_the_cars_value(
     await _set_temperature(hass, 18.0)
     assert coordinator.climate_target_temperature == 18.0
 
-    await coordinator.tiers["fast"].async_refresh()
+    await coordinator.async_refresh()
 
     assert coordinator.climate_target_temperature == 18.0
     await _turn_climate_on(hass)

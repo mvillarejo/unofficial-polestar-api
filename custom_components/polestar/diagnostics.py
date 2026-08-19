@@ -67,20 +67,16 @@ def _stream_diagnostics(coordinator: PolestarCoordinator) -> dict[str, Any]:
     return streams
 
 
-def _tier_diagnostics(coordinator: PolestarCoordinator) -> dict[str, Any]:
-    """Report each poll tier's interval, endpoints and last result."""
+def _poll_diagnostics(coordinator: PolestarCoordinator) -> dict[str, Any]:
+    """Report the coordinator's poll interval and progress."""
     return {
-        tier: {
-            "interval_seconds": (
-                tier_coordinator.update_interval.total_seconds()
-                if tier_coordinator.update_interval is not None
-                else None
-            ),
-            "attrs": list(tier_coordinator.attrs),
-            "poll_count": tier_coordinator._poll_count,
-            "last_update_success": tier_coordinator.last_update_success,
-        }
-        for tier, tier_coordinator in coordinator.tiers.items()
+        "interval_seconds": (
+            coordinator.update_interval.total_seconds()
+            if coordinator.update_interval is not None
+            else None
+        ),
+        "poll_count": coordinator._poll_count,
+        "last_update_success": coordinator.last_update_success,
     }
 
 
@@ -90,7 +86,7 @@ def _coordinator_diagnostics(coordinator: PolestarCoordinator) -> dict[str, Any]
         "model_name": coordinator.vehicle.model_name,
         "model_year": coordinator.vehicle.model_year,
         "last_update_success": coordinator.last_update_success,
-        "tiers": _tier_diagnostics(coordinator),
+        "poll": _poll_diagnostics(coordinator),
         "streams_enabled": coordinator.streams_enabled,
         "unsupported_fetches": sorted(coordinator._unsupported_fetches),
         "unsupported_streams": sorted(coordinator._unsupported_streams),

@@ -22,7 +22,7 @@ from custom_components.polestar.const import (
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
 )
-from custom_components.polestar.coordinator import _FETCH_ATTRS
+from custom_components.polestar.coordinator import _FETCH_ATTRS, STREAM_METHODS
 from polestar_api.models.battery import Battery, ChargingStatus
 from polestar_api.models.climate import ClimatizationInfo, ClimatizationRunningStatus
 from polestar_api.models.exterior import ExteriorStatus
@@ -100,11 +100,12 @@ def mock_vehicle(battery, climate_off) -> MagicMock:
     ):
         setattr(vehicle, command, AsyncMock(return_value=None))
 
-    # No stream_* attributes: streams are opt-in and off by default, and
-    # getattr(...) returning a MagicMock would otherwise start fake tasks.
-    for method_name in list(vars(type(vehicle))):
-        if method_name.startswith("stream_"):  # pragma: no cover - defensive
-            delattr(vehicle, method_name)
+    # A bare MagicMock auto-vivifies any attribute access, so getattr(...,
+    # None) would never see a missing method and streams (on by default)
+    # would spin up fake tasks against it. Pin each stream method to None so
+    # async_start_streams treats them as genuinely unsupported.
+    for method_name in STREAM_METHODS.values():
+        setattr(vehicle, method_name, None)
     return vehicle
 
 

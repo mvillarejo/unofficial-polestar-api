@@ -3,8 +3,9 @@
 Two separate mechanisms conspire to produce that symptom, and both are
 regression-tested here:
 
-* the snapshot is written by tier polls, post-command refreshes and streams
-  concurrently, so a slow fetch can finish after a newer one and overwrite it;
+* the snapshot is written by scheduled polls, post-command refreshes and
+  streams concurrently, so a slow fetch can finish after a newer one and
+  overwrite it;
 * the car takes seconds to minutes to report a command back, so an entity that
   stops showing its optimistic value too early falls back to the pre-command
   snapshot in the meantime.

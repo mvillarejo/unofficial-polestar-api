@@ -88,7 +88,7 @@ async def test_every_platform_produced_entities(
 async def test_entities_are_available_after_setup(
     hass: HomeAssistant, setup_integration
 ) -> None:
-    """The hub reports success once its tiers have primed."""
+    """The coordinator reports success once its first poll has primed."""
     state = hass.states.get("sensor.polestar_4_test123_battery_level")
     assert state is not None
     assert state.state == "62"

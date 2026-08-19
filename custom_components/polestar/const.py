@@ -18,26 +18,17 @@ PLATFORMS = [
     "update",
 ]
 
-# The fast tier's poll interval. Every other tier is a fixed multiple of it,
-# so one setting scales the whole integration up or down together.
+# How often the single coordinator polls every attribute together.
 CONF_UPDATE_INTERVAL = "update_interval"
-DEFAULT_UPDATE_INTERVAL = 300  # seconds
+DEFAULT_UPDATE_INTERVAL = 600  # seconds
 MIN_UPDATE_INTERVAL = 60
 MAX_UPDATE_INTERVAL = 1800
 
-TIER_MULTIPLIERS: dict[str, int] = {
-    "fast": 1,
-    "medium": 3,
-    "slow": 8,
-    "very_slow": 30,
-}
-
-# Live gRPC subscriptions are an optional latency accelerator on top of
-# polling, not the freshness mechanism. Off by default: polling alone keeps
-# every entity current, and a persistent subscription per attribute is the
-# part of the old design that proved hardest to operate.
+# Live gRPC subscriptions are the primary responsiveness mechanism, on top of
+# the slower poll timer above. On by default; can still be turned off from
+# Options for a car/account where persistent subscriptions prove unreliable.
 CONF_ENABLE_STREAMS = "enable_streams"
-DEFAULT_ENABLE_STREAMS = False
+DEFAULT_ENABLE_STREAMS = True
 STREAM_RETRY_DELAY = 30  # seconds (initial, doubles each retry)
 STREAM_MAX_RETRIES = 10
 

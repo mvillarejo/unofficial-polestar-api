@@ -1,27 +1,23 @@
 """Data update coordinators for Polestar vehicles.
 
-The integration uses a *hub + tiers* shape:
+``PolestarCoordinator`` owns the single ``PolestarVehicleData`` snapshot,
+every remote command, and the entity listener bus. It polls every attribute
+in ``_FETCH_ATTRS`` together on one timer (``CONF_UPDATE_INTERVAL``,
+default 10 minutes), and layers always-on persistent gRPC subscriptions
+(``STREAM_METHODS``) on top as the responsiveness mechanism — the poll is
+the freshness guarantee, streams are what make most attributes update within
+seconds rather than minutes.
 
-``PolestarCoordinator`` (the hub) owns the single ``PolestarVehicleData``
-snapshot, every remote command, and the entity listener bus. It has no
-``update_interval`` of its own — it never polls on a timer.
-
-``PolestarTierCoordinator`` (four instances) each own a fixed list of
-endpoints matched to how often that data actually changes, poll them
-concurrently on their own timer, and apply the results into the hub. This
-mirrors the tiered-polling design of Home Assistant core's ``volvo``
-integration, which talks to the same vendor's cloud.
-
-Entities subscribe to the hub, so they see the complete merged snapshot no
-matter which tier last refreshed it, and their ``unique_id``s are unchanged
-from the single-coordinator design.
+Entities subscribe to the coordinator directly, so they see the complete
+snapshot regardless of whether a given attribute last changed via the poll
+or a stream.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Iterable, Sequence
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import MISSING, dataclass, field, fields, replace
 from datetime import time as dt_time, timedelta
 from typing import TYPE_CHECKING, Any
@@ -71,7 +67,6 @@ from .const import (
     MIN_UPDATE_INTERVAL,
     STREAM_MAX_RETRIES,
     STREAM_RETRY_DELAY,
-    TIER_MULTIPLIERS,
 )
 from .utils import local_utc_offset_minutes
 
@@ -172,59 +167,25 @@ _FETCH_ATTRS: dict[str, str] = {
     "climate_timer_settings": "get_climate_timer_settings",
 }
 
-# Which endpoints each poll tier owns. Every key of _FETCH_ATTRS must appear in
-# exactly one tier — test_coordinator.py asserts both halves of that.
-TIER_FAST = "fast"
-TIER_MEDIUM = "medium"
-TIER_SLOW = "slow"
-TIER_VERY_SLOW = "very_slow"
-
-TIER_ATTRS: dict[str, tuple[str, ...]] = {
-    # Changes minute to minute while driving, charging or pre-conditioning.
-    TIER_FAST: (
-        "battery",
-        "climate",
-        "exterior",
-    ),
-    # Changes over a drive, but a couple of minutes of lag is imperceptible.
-    TIER_MEDIUM: (
-        "location",
-        "parked_location",
-        "odometer",
-        "dashboard",
-    ),
-    # Slow-moving status and charging configuration.
-    TIER_SLOW: (
-        "health",
-        "availability",
-        "connectivity",
-        "precleaning",
-        "weather",
-        "target_soc",
-        "amp_limit",
-    ),
-    # Configuration and schedules that essentially only change when someone
-    # changes them, and which are re-read eagerly after any command anyway.
-    TIER_VERY_SLOW: (
-        "software",
-        "ota_schedule",
-        "charge_timer",
-        "charge_locations",
-        "current_charge_location",
-        "climate_timers",
-        "climate_timer_settings",
-    ),
-}
-
-TIER_ORDER: tuple[str, ...] = (TIER_FAST, TIER_MEDIUM, TIER_SLOW, TIER_VERY_SLOW)
-
-# Live subscriptions are a latency accelerator only — polling above is the
-# freshness guarantee. Deliberately a short list, and off by default.
+# Persistent live subscriptions for every attribute the backend supports
+# streaming. This is the primary responsiveness mechanism; the poll timer in
+# _FETCH_ATTRS is the freshness guarantee underneath it.
 STREAM_METHODS: dict[str, str] = {
     "battery": "stream_battery",
+    "location": "stream_location",
+    "parked_location": "stream_parked_location",
     "climate": "stream_climate",
     "exterior": "stream_exterior",
-    "location": "stream_location",
+    "precleaning": "stream_precleaning",
+    "odometer": "stream_odometer",
+    "health": "stream_health",
+    "target_soc": "stream_target_soc",
+    "amp_limit": "stream_amp_limit",
+    "charge_timer": "stream_charge_timer",
+    "software": "stream_software_info",
+    "ota_schedule": "stream_ota_schedule",
+    "climate_timers": "stream_climate_timers",
+    "climate_timer_settings": "stream_climate_timer_settings",
 }
 
 _ATTR_FIELDS = {spec.name: spec for spec in fields(PolestarVehicleData)}
@@ -238,27 +199,8 @@ def _attr_default(attr: str) -> Any:
     return spec.default
 
 
-def tier_intervals(base_seconds: int) -> dict[str, timedelta]:
-    """Derive every tier's poll interval from the configured base interval.
-
-    *base_seconds* is the fast tier. The remaining tiers are fixed multiples of
-    it, so a user who slows the integration down slows all of it down together.
-    """
-
-    base = max(MIN_UPDATE_INTERVAL, min(base_seconds, MAX_UPDATE_INTERVAL))
-    return {tier: timedelta(seconds=base * TIER_MULTIPLIERS[tier]) for tier in TIER_ORDER}
-
-
 class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
-    """Hub coordinator: owns the vehicle snapshot, commands and listeners.
-
-    It has no update_interval — PolestarTierCoordinator instances do the
-    polling and feed results in through async_apply_values.
-    """
-
-    # Set on the class because the base __init__ assigns
-    # self.last_update_success, which is a property here.
-    _hub_update_success: bool = True
+    """Owns the vehicle snapshot, commands, listeners, and the poll timer."""
 
     def __init__(
         self,
@@ -266,18 +208,18 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
         vehicle: Vehicle,
         entry: ConfigEntry,
     ) -> None:
+        base = entry.options.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL)
+        base = max(MIN_UPDATE_INTERVAL, min(base, MAX_UPDATE_INTERVAL))
         super().__init__(
             hass,
             _LOGGER,
             name=f"Polestar {vehicle.vin}",
-            update_interval=None,
+            update_interval=timedelta(seconds=base),
             config_entry=entry,
             always_update=True,
         )
         self.vehicle = vehicle
         self.climate_preferences = ClimateCommandPreferences()
-        self.tiers: dict[str, PolestarTierCoordinator] = {}
-        self._unsub_tiers: list[Callable[[], None]] = []
         self.data = PolestarVehicleData()
         self._climate_temperature_override: float | None = None
         self._installed_version_cache: str | None = None
@@ -287,30 +229,7 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
         self._unsupported_fetches: set[str] = set()
         self._generation = 0
         self._applied_generations: dict[str, int] = {}
-
-    # ------------------------------------------------------------------
-    # Tier plumbing
-    # ------------------------------------------------------------------
-
-    def create_tiers(self) -> list[PolestarTierCoordinator]:
-        """Build the four interval coordinators for this vehicle."""
-        entry = self.config_entry
-        assert entry is not None
-        base = entry.options.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL)
-        intervals = tier_intervals(base)
-        self.tiers = {
-            tier: PolestarTierCoordinator(self, tier, TIER_ATTRS[tier], intervals[tier])
-            for tier in TIER_ORDER
-        }
-        for tier_coordinator in self.tiers.values():
-            # A DataUpdateCoordinator only arms its timer while it has at least
-            # one listener, and entities subscribe to the hub rather than to the
-            # tiers. Subscribing the hub's own notifier keeps the tier polling
-            # and propagates its success/failure to every entity.
-            self._unsub_tiers.append(
-                tier_coordinator.async_add_listener(self.async_update_listeners)
-            )
-        return list(self.tiers.values())
+        self._poll_count = 0
 
     def next_fetch_generation(self) -> int:
         """Claim the next fetch sequence number.
@@ -355,26 +274,6 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
         if "software" in fresh:
             self._update_installed_version_cache(self.data.software)
         self.async_update_listeners()
-
-    @property
-    def last_update_success(self) -> bool:
-        """Entities are available while at least one tier is still succeeding.
-
-        Derived rather than stored: the hub never polls on a timer, so it has
-        no update result of its own to report.
-        """
-        if not self.tiers:
-            return self._hub_update_success
-        return any(tier.last_update_success for tier in self.tiers.values())
-
-    @last_update_success.setter
-    def last_update_success(self, value: bool) -> None:
-        self._hub_update_success = value
-
-    @property
-    def tier_for_attr(self) -> dict[str, str]:
-        """Map each fetchable attribute to the tier that polls it."""
-        return {attr: tier for tier, attrs in TIER_ATTRS.items() for attr in attrs}
 
     # ------------------------------------------------------------------
     # Fetching
@@ -448,12 +347,17 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
         return values, successful, len(attr_names)
 
     async def _async_update_data(self) -> PolestarVehicleData:
-        """Refresh every attribute at once (manual refresh, not a timer)."""
+        """Poll every attribute together on the coordinator's own timer."""
+        self._poll_count += 1
         generation = self.next_fetch_generation()
-        values, successful, _ = await self.async_fetch_values(_FETCH_ATTRS)
+        values, successful, _ = await self.async_fetch_values(
+            _FETCH_ATTRS,
+            probe_unsupported=self._poll_count % _UNSUPPORTED_REPROBE_CYCLES == 1,
+        )
         if successful == 0:
             raise UpdateFailed("All API calls failed")
         self.async_apply_values(values, generation=generation)
+        self.async_restart_finished_streams()
         return self.data
 
     async def async_request_attrs_refresh(self, *attrs: str) -> None:
@@ -603,13 +507,7 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
         return min(STREAM_RETRY_DELAY * (2 ** (failures - 1)), 600)
 
     async def async_shutdown(self) -> None:
-        """Stop the tiers and cancel any running stream tasks."""
-        for unsub in self._unsub_tiers:
-            unsub()
-        self._unsub_tiers.clear()
-        for tier_coordinator in self.tiers.values():
-            await tier_coordinator.async_shutdown()
-        self.tiers.clear()
+        """Cancel any running stream tasks."""
         for task in self._stream_tasks.values():
             task.cancel()
         if self._stream_tasks:
@@ -1109,59 +1007,12 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
         return status
 
 
-class PolestarTierCoordinator(DataUpdateCoordinator[None]):
-    """Polls one fixed group of endpoints on its own interval.
-
-    Results are applied to the hub rather than kept here, so every entity sees
-    the whole vehicle snapshot regardless of which tier refreshed it.
-    """
-
-    def __init__(
-        self,
-        hub: PolestarCoordinator,
-        tier: str,
-        attrs: Sequence[str],
-        update_interval: timedelta,
-    ) -> None:
-        super().__init__(
-            hub.hass,
-            _LOGGER,
-            name=f"Polestar {hub.vehicle.vin} {tier}",
-            update_interval=update_interval,
-            config_entry=hub.config_entry,
-        )
-        self.hub = hub
-        self.tier = tier
-        self.attrs = tuple(attrs)
-        self._poll_count = 0
-
-    async def _async_update_data(self) -> None:
-        """Poll this tier's endpoints and merge the results into the hub."""
-        self._poll_count += 1
-        generation = self.hub.next_fetch_generation()
-        values, successful, attempted = await self.hub.async_fetch_values(
-            self.attrs,
-            probe_unsupported=self._poll_count % _UNSUPPORTED_REPROBE_CYCLES == 1,
-        )
-
-        self.hub.async_apply_values(values, generation=generation)
-
-        if attempted and successful == 0:
-            raise UpdateFailed(
-                f"All {attempted} {self.tier}-tier API calls failed for {self.hub.vehicle.vin}"
-            )
-
-        if self.tier == TIER_FAST:
-            self.hub.async_restart_finished_streams()
-
-
 @dataclass
 class PolestarRuntimeData:
     """Runtime objects kept on the config entry for its lifetime."""
 
     api: PolestarApi | None
     coordinators: dict[str, PolestarCoordinator]
-    tiers: list[PolestarTierCoordinator] = field(default_factory=list)
 
 
 type PolestarConfigEntry = ConfigEntry[PolestarRuntimeData]

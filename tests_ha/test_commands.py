@@ -136,7 +136,7 @@ async def test_honk_flash_buttons_dispatch(
 async def test_refresh_button_polls_every_endpoint(
     hass: HomeAssistant, setup_integration, mock_vehicle, coordinator
 ) -> None:
-    """The manual refresh button must not be limited to one tier."""
+    """The manual refresh button must poll every endpoint, not a subset."""
     mock_vehicle.get_battery.reset_mock()
     mock_vehicle.get_weather.reset_mock()
     mock_vehicle.get_software_info.reset_mock()

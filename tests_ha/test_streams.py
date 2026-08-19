@@ -1,8 +1,9 @@
-"""Optional live subscriptions.
+"""Live subscriptions layered on top of the poll.
 
-Streams are an accelerator layered on polling, never the freshness mechanism.
-That is what lets them be off by default and lets a dead stream be a non-event
-rather than something a watchdog has to detect and recover from.
+Streams are the primary responsiveness mechanism, but the poll is still the
+freshness guarantee underneath them — a dead stream is a non-event that the
+next poll quietly recovers from, rather than something a watchdog has to
+detect.
 """
 
 from __future__ import annotations
@@ -19,17 +20,19 @@ from custom_components.polestar.const import (
     CONF_UPDATE_INTERVAL,
     DEFAULT_UPDATE_INTERVAL,
 )
-from custom_components.polestar.coordinator import STREAM_METHODS, TIER_FAST
+from custom_components.polestar.coordinator import STREAM_METHODS
 from polestar_api.models.battery import Battery, ChargingStatus
 
 
-async def test_streams_are_off_by_default(coordinator) -> None:
-    """The conservative default: polling only."""
-    assert not coordinator.streams_enabled
-    assert not coordinator._stream_tasks
+async def test_streams_are_on_by_default(coordinator) -> None:
+    """The default: streams accelerate polling rather than replacing it."""
+    assert coordinator.streams_enabled
 
 
-async def test_no_streams_started_when_disabled(coordinator, mock_vehicle) -> None:
+async def test_no_streams_started_when_vehicle_has_no_stream_methods(
+    coordinator, mock_vehicle
+) -> None:
+    """mock_vehicle deliberately has no stream_* attrs; nothing should start."""
     await coordinator.async_start_streams()
     assert not coordinator._stream_tasks
 
@@ -59,7 +62,7 @@ def streaming_vehicle(mock_vehicle):
 async def streaming_setup(
     hass: HomeAssistant, mock_api, streaming_vehicle
 ) -> MockConfigEntry:
-    """An entry with streams explicitly enabled."""
+    """An entry with a vehicle that actually supports streaming."""
     entry = MockConfigEntry(
         domain="polestar",
         unique_id="LPSVSEDEEPL000001",
@@ -100,7 +103,7 @@ async def test_stream_value_reaches_entity_state(
     assert hass.states.get("sensor.polestar_4_test123_battery_level").state == "71"
 
 
-async def test_finished_stream_is_restarted_by_the_fast_tier(
+async def test_finished_stream_is_restarted_by_the_next_poll(
     streaming_setup, hass: HomeAssistant
 ) -> None:
     """Recovery rides on the poll cycle instead of a bespoke watchdog."""
@@ -110,7 +113,7 @@ async def test_finished_stream_is_restarted_by_the_fast_tier(
     await asyncio.gather(task, return_exceptions=True)
     assert coordinator._stream_tasks["battery"].done()
 
-    await coordinator.tiers[TIER_FAST].async_refresh()
+    await coordinator.async_refresh()
 
     assert not coordinator._stream_tasks["battery"].done()
     assert coordinator._stream_tasks["battery"] is not task
@@ -132,10 +135,10 @@ async def test_streams_are_cancelled_on_unload(
 async def test_polling_still_runs_with_streams_enabled(
     streaming_setup, hass: HomeAssistant, streaming_vehicle
 ) -> None:
-    """Streams never replace the poll — that is what makes them optional."""
+    """Streams never replace the poll — it is still the freshness guarantee."""
     coordinator = next(iter(streaming_setup.runtime_data.coordinators.values()))
     streaming_vehicle.get_battery.reset_mock()
 
-    await coordinator.tiers[TIER_FAST].async_refresh()
+    await coordinator.async_refresh()
 
     streaming_vehicle.get_battery.assert_called_once()

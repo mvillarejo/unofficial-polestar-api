@@ -10,7 +10,7 @@ from collections.abc import AsyncIterator
 from grpclib.client import Channel
 from grpclib.const import Cardinality, Status
 from grpclib.encoding.base import CodecBase
-from grpclib.exceptions import GRPCError
+from grpclib.exceptions import GRPCError, StreamTerminatedError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -69,7 +69,7 @@ async def unary_unary(
             if exc.status not in _RETRIABLE_STATUSES:
                 raise
             _LOGGER.debug("Transient gRPC error on %s: %s", method, exc)
-        except OSError as exc:
+        except (OSError, StreamTerminatedError) as exc:
             last_exc = exc
             _LOGGER.debug("Connection error on %s: %s", method, exc)
     raise last_exc
@@ -120,7 +120,7 @@ async def unary_stream(
             if exc.status not in _RETRIABLE_STATUSES:
                 raise
             _LOGGER.debug("Transient gRPC error on %s: %s", method, exc)
-        except OSError as exc:
+        except (OSError, StreamTerminatedError) as exc:
             if yielded:
                 return
             last_exc = exc

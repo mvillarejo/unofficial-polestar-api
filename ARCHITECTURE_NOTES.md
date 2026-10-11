@@ -129,6 +129,39 @@ healthy always-on stream accumulates about 30 an hour. Per vehicle,
 intervals, and `streams` shows each stream's policy and whether it is running.
 An active-only stream that is not started while the car is idle is expected.
 
+## Reading `unknown_fields` in diagnostics
+
+The `unknown_fields` block lists protobuf fields the parsers received but do
+not map. It is filled by `polestar_api/unknown_fields.py` from responses the
+integration already fetches, so it costs no extra calls, and like `api_calls`
+it resets on HA restart or integration reload. Leave the car on normal use for
+a few days (drive, lock, charge), then download diagnostics.
+
+Keys are `label:path`. The label is the parser: `battery`, `exterior`
+(digital twin), `exterior_legacy`, `location`, `climate` (digital twin),
+`climate_legacy` and `health`. The path is the field number inside the inner
+message, dotted for nested messages: `battery:28`, `exterior:15`,
+`health:46.5`, `location:5.4` (field 4 inside the compact location at 5).
+Polls and streams feed the same key.
+
+Per key: `count` is how many times the field arrived, `last` is its latest
+value, `values` holds up to 10 distinct values with the UTC time each was
+first seen, and `more_values` turns true once more than 10 have appeared,
+which points to a measurement rather than an enum. Proto3 omits default
+values, so a `0` shows up only when the backend sends it explicitly.
+
+What is never stored:
+
+- strings and bytes, which appear as `bytes[<length>]`, so no VIN or
+  identifier can end up here;
+- a nested message shaped like a `google.protobuf.Timestamp` is stored as the
+  value `timestamp`, with the time itself only in `last`;
+- in `location`, floats are rounded to one decimal and unknown nested
+  messages are kept as `bytes[<length>]`, so no coordinate pair is recorded.
+
+To learn what a field means, line up when a value was first seen with what the
+car was doing at that time.
+
 ## Error contract
 
 - `AuthError` / `TokenExpiredError` from any call: `ConfigEntryAuthFailed`,

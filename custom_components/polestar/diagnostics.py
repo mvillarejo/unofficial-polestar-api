@@ -13,6 +13,7 @@ from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.core import HomeAssistant
 
 from polestar_api import grpc as grpc_call
+from polestar_api import unknown_fields
 
 from .const import CONF_VIN
 from .coordinator import (
@@ -131,6 +132,7 @@ async def async_get_config_entry_diagnostics(
         "entry_options": async_redact_data(dict(entry.options), TO_REDACT),
         "demo_mode": data.api is None,
         "api_calls": _api_call_diagnostics(),
+        "unknown_fields": unknown_fields.snapshot(),
         "vehicles": [
             _coordinator_diagnostics(coordinator)
             for coordinator in data.coordinators.values()

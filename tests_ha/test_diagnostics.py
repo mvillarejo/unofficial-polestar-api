@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from collections import Counter
 
@@ -10,6 +11,8 @@ from homeassistant.core import HomeAssistant
 
 from custom_components.polestar.diagnostics import async_get_config_entry_diagnostics
 from polestar_api import grpc as grpc_call
+from polestar_api import unknown_fields
+from polestar_api.codec import encode_double, encode_int32, encode_message, encode_string
 
 from .conftest import TEST_VIN
 
@@ -52,3 +55,43 @@ async def test_diagnostics_keep_redacting_the_vin(
     diag = await async_get_config_entry_diagnostics(hass, setup_integration)
 
     assert TEST_VIN not in repr(diag)
+
+
+async def test_unknown_fields_reports_unmapped_fields_without_identifiers(
+    hass: HomeAssistant, setup_integration, monkeypatch
+) -> None:
+    monkeypatch.setattr(unknown_fields, "UNKNOWN_FIELDS", {})
+    unknown_fields.record_fields(
+        "exterior", encode_int32(15, 1) + encode_string(17, TEST_VIN), set(range(2, 15))
+    )
+    coordinate = encode_double(1, 18.123456) + encode_double(2, 59.654321)
+    unknown_fields.record_fields(
+        "location",
+        encode_double(6, 87.66) + encode_message(9, coordinate),
+        {2, 3, 4},
+        coarse=True,
+    )
+
+    diag = await async_get_config_entry_diagnostics(hass, setup_integration)
+
+    block = diag["unknown_fields"]
+    assert list(block) == ["exterior:15", "exterior:17", "location:6", "location:9"]
+    assert block["exterior:15"]["count"] == 1
+    assert block["exterior:15"]["last"] == 1
+    assert block["exterior:15"]["values"][0]["value"] == 1
+    assert block["exterior:17"]["last"] == f"bytes[{len(TEST_VIN)}]"
+    assert block["location:6"]["last"] == 87.7
+    text = json.dumps(block)
+    assert TEST_VIN not in text
+    assert "18.1" not in text
+    assert "59.6" not in text
+
+
+async def test_unknown_fields_empty_by_default(
+    hass: HomeAssistant, setup_integration, monkeypatch
+) -> None:
+    monkeypatch.setattr(unknown_fields, "UNKNOWN_FIELDS", {})
+
+    diag = await async_get_config_entry_diagnostics(hass, setup_integration)
+
+    assert diag["unknown_fields"] == {}

@@ -21,7 +21,7 @@ from custom_components.polestar.const import (
 )
 from custom_components.polestar.coordinator import (
     _FETCH_ATTRS,
-    _UNSUPPORTED_REPROBE_CYCLES,
+    _UNSUPPORTED_REPROBE_INTERVAL,
     STREAM_METHODS,
     PolestarVehicleData,
 )
@@ -133,26 +133,33 @@ async def test_unimplemented_clears_the_attribute_and_is_then_skipped(
     mock_vehicle.get_health.assert_not_called()
 
 
-async def test_unsupported_endpoint_is_reprobed_periodically(
+async def test_unsupported_endpoint_is_reprobed_once_a_day(
     hass: HomeAssistant, coordinator, mock_vehicle
 ) -> None:
-    """A backend that starts serving an endpoint again must be picked up."""
-    mock_vehicle.get_health.side_effect = GRPCError(GrpcStatus.UNIMPLEMENTED, "nope")
-    await coordinator.async_refresh()
-    assert "health" in coordinator._unsupported_fetches
-
-    mock_vehicle.get_health.side_effect = None
-    mock_vehicle.get_health.return_value = "healthy"
-
-    called = False
-    for _ in range(_UNSUPPORTED_REPROBE_CYCLES * 2):
-        mock_vehicle.get_health.reset_mock()
+    """A backend that starts serving an endpoint again must be picked up,
+    without hammering an endpoint the car does not support on every poll."""
+    clock = [1_000_000.0]
+    with patch(
+        "custom_components.polestar.coordinator.monotonic", side_effect=lambda: clock[0]
+    ):
+        coordinator._last_unsupported_probe = None
+        mock_vehicle.get_health.side_effect = GRPCError(GrpcStatus.UNIMPLEMENTED, "nope")
         await coordinator.async_refresh()
-        if mock_vehicle.get_health.called:
-            called = True
-            break
+        assert "health" in coordinator._unsupported_fetches
 
-    assert called, "an unsupported endpoint was never re-probed"
+        mock_vehicle.get_health.side_effect = None
+        mock_vehicle.get_health.return_value = "healthy"
+
+        for _ in range(20):
+            clock[0] += 300
+            mock_vehicle.get_health.reset_mock()
+            await coordinator.async_refresh()
+            mock_vehicle.get_health.assert_not_called()
+
+        clock[0] += _UNSUPPORTED_REPROBE_INTERVAL
+        await coordinator.async_refresh()
+
+    mock_vehicle.get_health.assert_called_once()
     assert coordinator.data.health == "healthy"
     assert "health" not in coordinator._unsupported_fetches
 

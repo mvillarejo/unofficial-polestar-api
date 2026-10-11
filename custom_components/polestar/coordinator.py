@@ -20,6 +20,7 @@ import logging
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import MISSING, dataclass, field, fields, replace
 from datetime import time as dt_time, timedelta
+from time import monotonic
 from typing import TYPE_CHECKING, Any
 
 from grpclib.const import Status as GrpcStatus
@@ -85,8 +86,9 @@ _LOGGER = logging.getLogger(__name__)
 # a command look like it had been silently undone.
 _POST_COMMAND_REFRESH_DELAYS: tuple[int, ...] = (3, 5, 10, 15, 30, 60)
 # Endpoints that answered UNIMPLEMENTED are skipped on scheduled polls, but
-# re-probed this often in case the backend starts serving them again.
-_UNSUPPORTED_REPROBE_CYCLES = 6
+# re-probed this often (seconds) in case the backend starts serving them again.
+# Elapsed time rather than a poll count, so it holds if the poll interval changes.
+_UNSUPPORTED_REPROBE_INTERVAL = 24 * 60 * 60
 _FETCH_TIMEOUT = 15
 _COMMAND_INVOCATION_SUCCESS = {
     InvocationStatus.SENT,
@@ -230,6 +232,7 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
         self._generation = 0
         self._applied_generations: dict[str, int] = {}
         self._poll_count = 0
+        self._last_unsupported_probe: float | None = None
 
     def next_fetch_generation(self) -> int:
         """Claim the next fetch sequence number.
@@ -352,13 +355,22 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
         generation = self.next_fetch_generation()
         values, successful, _ = await self.async_fetch_values(
             _FETCH_ATTRS,
-            probe_unsupported=self._poll_count % _UNSUPPORTED_REPROBE_CYCLES == 1,
+            probe_unsupported=self._claim_unsupported_probe(),
         )
         if successful == 0:
             raise UpdateFailed("All API calls failed")
         self.async_apply_values(values, generation=generation)
         self.async_restart_finished_streams()
         return self.data
+
+    def _claim_unsupported_probe(self) -> bool:
+        """Whether this poll should re-probe endpoints that were UNIMPLEMENTED."""
+        now = monotonic()
+        last = self._last_unsupported_probe
+        if last is not None and now - last < _UNSUPPORTED_REPROBE_INTERVAL:
+            return False
+        self._last_unsupported_probe = now
+        return True
 
     async def async_request_attrs_refresh(self, *attrs: str) -> None:
         """Refresh only the requested attributes and notify entities."""

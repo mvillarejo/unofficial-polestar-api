@@ -13,6 +13,15 @@ class TokenExpiredError(AuthError):
     """Token has expired and refresh failed."""
 
 
+class AuthCooldownError(PolestarError):
+    """A password login was attempted recently; not retrying yet.
+
+    Deliberately not an ``AuthError``: the failed login may have been a network
+    blip, so callers should treat this as transient rather than as rejected
+    credentials.
+    """
+
+
 class ApiError(PolestarError):
     """An API call failed."""
 

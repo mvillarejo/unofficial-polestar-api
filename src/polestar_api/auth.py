@@ -18,7 +18,7 @@ import ssl
 
 import httpx
 
-from .exceptions import AuthError, TokenExpiredError
+from .exceptions import AuthCooldownError, AuthError, TokenExpiredError
 
 # Pre-build SSL context at import time so httpx never triggers
 # blocking load_verify_locations inside the HA event loop (Python 3.14).
@@ -176,7 +176,7 @@ class AuthManager:
                 return self._tokens.access_token
 
             if self._reauth_on_cooldown():
-                raise TokenExpiredError("Token expired and re-authentication is on cooldown")
+                raise AuthCooldownError("Token expired and re-authentication is on cooldown")
 
             if self._tokens.refresh_token:
                 try:

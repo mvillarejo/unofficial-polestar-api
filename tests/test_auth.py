@@ -7,7 +7,7 @@ import pytest
 
 from polestar_api import auth
 from polestar_api.auth import AuthManager, MemoryTokenStore, TokenData
-from polestar_api.exceptions import AuthError, TokenExpiredError
+from polestar_api.exceptions import AuthCooldownError, AuthError, TokenExpiredError
 
 
 class TestTokenData:
@@ -203,10 +203,12 @@ class TestEnsureValidToken:
 
         assert fake_oidc.logins == 1
         assert fake_oidc.refreshes == 1
-        assert all(isinstance(r, AuthError) for r in results)
-        assert sum(isinstance(r, TokenExpiredError) for r in results) == 19
+        assert sum(isinstance(r, AuthError) for r in results) == 1
+        cooldowns = [r for r in results if isinstance(r, AuthCooldownError)]
+        assert len(cooldowns) == 19
+        assert not any(isinstance(r, AuthError) for r in cooldowns)
 
-        with pytest.raises(TokenExpiredError):
+        with pytest.raises(AuthCooldownError):
             await manager.ensure_valid_token()
         assert fake_oidc.logins == 1
 

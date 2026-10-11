@@ -16,6 +16,7 @@ from polestar_api import grpc as grpc_call
 
 from .const import CONF_VIN
 from .coordinator import (
+    ALWAYS_ON_STREAMS,
     STREAM_METHODS,
     PolestarConfigEntry,
     PolestarCoordinator,
@@ -53,11 +54,16 @@ def _serialize(value: Any) -> Any:
 
 
 def _stream_diagnostics(coordinator: PolestarCoordinator) -> dict[str, Any]:
-    """Report liveness of the optional long-lived subscriptions."""
+    """Report liveness of the live subscriptions.
+
+    An active-only stream that is not started while the car is idle is the
+    expected state, not a failure.
+    """
     streams: dict[str, Any] = {}
     for attr in sorted(STREAM_METHODS):
         task = coordinator._stream_tasks.get(attr)
         info: dict[str, Any] = {
+            "policy": "always_on" if attr in ALWAYS_ON_STREAMS else "active_only",
             "started": task is not None,
             "running": task is not None and not task.done(),
             "supported": attr not in coordinator._unsupported_streams,

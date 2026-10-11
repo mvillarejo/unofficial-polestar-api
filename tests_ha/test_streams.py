@@ -1,9 +1,11 @@
 """Live subscriptions layered on top of the poll.
 
-Streams are the primary responsiveness mechanism, but the poll is still the
-freshness guarantee underneath them — a dead stream is a non-event that the
-next poll quietly recovers from, rather than something a watchdog has to
-detect.
+Streams are the responsiveness mechanism for the few attributes worth their
+price (the server closes each one after ~120s, so an open stream costs ~720
+calls a day). Battery and exterior stream whenever streams are on; climate and
+location only while the car is active. The poll is still the freshness
+guarantee underneath them — a dead stream is a non-event that the next poll
+quietly recovers from, rather than something a watchdog has to detect.
 """
 
 from __future__ import annotations
@@ -21,8 +23,22 @@ from custom_components.polestar.const import (
     DEFAULT_UPDATE_INTERVAL,
     STREAM_MIN_RESUBSCRIBE_INTERVAL,
 )
-from custom_components.polestar.coordinator import STREAM_METHODS
+from custom_components.polestar.coordinator import (
+    ACTIVE_ONLY_STREAMS,
+    ALWAYS_ON_STREAMS,
+    STREAM_METHODS,
+)
+from custom_components.polestar.diagnostics import async_get_config_entry_diagnostics
 from polestar_api.models.battery import Battery, ChargingStatus
+from polestar_api.models.exterior import CentralLockStatus, ExteriorStatus, LockStatus
+
+IDLE_BATTERY = Battery(charge_level=62, charging_status=ChargingStatus.IDLE, range_km=310)
+LOCKED = ExteriorStatus(central_lock=CentralLockStatus(lock_status=LockStatus.LOCKED))
+UNLOCKED = ExteriorStatus(central_lock=CentralLockStatus(lock_status=LockStatus.UNLOCKED))
+
+
+def _running(coordinator) -> set[str]:
+    return {attr for attr, task in coordinator._stream_tasks.items() if not task.done()}
 
 
 async def test_streams_are_on_by_default(coordinator) -> None:
@@ -81,11 +97,92 @@ async def streaming_setup(
     return entry
 
 
-async def test_enabled_streams_start_for_every_streamable_attr(
+@pytest.fixture
+async def idle_streaming_setup(
+    hass: HomeAssistant, mock_api, streaming_vehicle
+) -> MockConfigEntry:
+    """Like streaming_setup, but the car is parked, locked and not charging."""
+    streaming_vehicle.get_battery.return_value = IDLE_BATTERY
+    streaming_vehicle.get_exterior.return_value = LOCKED
+    entry = MockConfigEntry(
+        domain="polestar",
+        unique_id="LPSVSEDEEPL000001",
+        version=2,
+        data={"email": "u@example.com", "password": "p", "vin": "LPSVSEDEEPL000001"},
+        options={CONF_UPDATE_INTERVAL: DEFAULT_UPDATE_INTERVAL, CONF_ENABLE_STREAMS: True},
+    )
+    entry.add_to_hass(hass)
+    with patch("custom_components.polestar.PolestarApi", return_value=mock_api):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+    return entry
+
+
+def test_only_the_valuable_attrs_stream() -> None:
+    """Every open stream costs ~720 calls a day, so the set stays small."""
+    assert set(ALWAYS_ON_STREAMS) == {"battery", "exterior"}
+    assert set(ACTIVE_ONLY_STREAMS) == {"climate", "location"}
+    assert set(STREAM_METHODS) == set(ALWAYS_ON_STREAMS) | set(ACTIVE_ONLY_STREAMS)
+
+
+async def test_active_car_streams_every_streamable_attr(
     streaming_setup, hass: HomeAssistant
 ) -> None:
+    """The default fixture battery is charging, which makes the car active."""
     coordinator = next(iter(streaming_setup.runtime_data.coordinators.values()))
-    assert set(coordinator._stream_tasks) == set(STREAM_METHODS)
+    assert coordinator.car_is_active
+    assert _running(coordinator) == set(STREAM_METHODS)
+
+
+async def test_idle_car_streams_only_the_always_on_attrs(
+    idle_streaming_setup, hass: HomeAssistant
+) -> None:
+    coordinator = next(iter(idle_streaming_setup.runtime_data.coordinators.values()))
+    assert not coordinator.car_is_active
+    assert _running(coordinator) == set(ALWAYS_ON_STREAMS)
+
+
+async def test_active_only_streams_follow_the_car_state(
+    idle_streaming_setup, hass: HomeAssistant, streaming_vehicle
+) -> None:
+    """An unlock pushed over the exterior stream wakes climate/location up;
+    locking again puts them back to sleep."""
+    coordinator = next(iter(idle_streaming_setup.runtime_data.coordinators.values()))
+
+    await streaming_vehicle.stream_updates["exterior"].put(UNLOCKED)
+    await hass.async_block_till_done()
+    assert _running(coordinator) == set(STREAM_METHODS)
+    climate_task = coordinator._stream_tasks["climate"]
+
+    await streaming_vehicle.stream_updates["exterior"].put(LOCKED)
+    await hass.async_block_till_done()
+    assert set(coordinator._stream_tasks) == set(ALWAYS_ON_STREAMS)
+    await asyncio.gather(climate_task, return_exceptions=True)
+    assert climate_task.cancelled()
+
+
+async def test_poll_does_not_restart_active_only_streams_while_idle(
+    idle_streaming_setup, hass: HomeAssistant
+) -> None:
+    coordinator = next(iter(idle_streaming_setup.runtime_data.coordinators.values()))
+
+    await coordinator.async_refresh()
+
+    assert _running(coordinator) == set(ALWAYS_ON_STREAMS)
+
+
+async def test_diagnostics_list_every_stream_with_its_policy(
+    idle_streaming_setup, hass: HomeAssistant
+) -> None:
+    diag = await async_get_config_entry_diagnostics(hass, idle_streaming_setup)
+
+    streams = diag["vehicles"][0]["streams"]
+    assert set(streams) == set(STREAM_METHODS)
+    assert streams["battery"] == {
+        "policy": "always_on", "started": True, "running": True, "supported": True
+    }
+    assert streams["climate"]["policy"] == "active_only"
+    assert not streams["climate"]["started"]
 
 
 async def test_stream_value_reaches_entity_state(

@@ -29,8 +29,8 @@ from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from polestar_api.exceptions import AuthError, TokenExpiredError
-from polestar_api.models.availability import Availability
-from polestar_api.models.battery import Battery
+from polestar_api.models.availability import Availability, UsageMode
+from polestar_api.models.battery import Battery, ChargingStatus
 from polestar_api.models.charge_location import ChargeLocation
 from polestar_api.models.charging import (
     AmpLimitResponse,
@@ -46,7 +46,7 @@ from polestar_api.models.climatization import HeatingIntensity
 from polestar_api.models.common import Location, ResponseStatusCode
 from polestar_api.models.connectivity import ConnectivityInfo
 from polestar_api.models.dashboard import DashboardStatus
-from polestar_api.models.exterior import ExteriorStatus
+from polestar_api.models.exterior import ExteriorStatus, OpenStatus
 from polestar_api.models.health import Health
 from polestar_api.models.invocation import InvocationStatus
 from polestar_api.models.odometer import OdometerStatus
@@ -100,6 +100,14 @@ _COMMAND_RESPONSE_STATUS_SUCCESS = {
     ResponseStatusCode.SUCCESS,
     ResponseStatusCode.WARNING,
 }
+# Someone is in or at the car. INACTIVE/ABANDONED/ENGINE_OFF read as parked.
+_IN_USE_MODES = {
+    UsageMode.CONVENIENCE,
+    UsageMode.ACTIVE,
+    UsageMode.DRIVING,
+    UsageMode.ENGINE_ON,
+}
+_CLOSED = {OpenStatus.UNSPECIFIED, OpenStatus.CLOSED}
 
 
 @dataclass
@@ -170,26 +178,22 @@ _FETCH_ATTRS: dict[str, str] = {
     "climate_timer_settings": "get_climate_timer_settings",
 }
 
-# Persistent live subscriptions for every attribute the backend supports
-# streaming. This is the primary responsiveness mechanism; the poll timer in
-# _FETCH_ATTRS is the freshness guarantee underneath it.
-STREAM_METHODS: dict[str, str] = {
+# Live subscriptions, deliberately few. Measured on a Polestar 4: the server
+# closes every subscription cleanly after ~120s and replays the latest snapshot
+# on resubscribe, so each stream that is kept open costs ~720 calls a day
+# whether or not anything changed. Only what is worth that price streams; every
+# other attribute is poll-only. Battery/charging and locks/doors/windows stream
+# whenever streams are enabled; climate and location only while the car is
+# active (see PolestarCoordinator.car_is_active).
+ALWAYS_ON_STREAMS: dict[str, str] = {
     "battery": "stream_battery",
-    "location": "stream_location",
-    "parked_location": "stream_parked_location",
-    "climate": "stream_climate",
     "exterior": "stream_exterior",
-    "precleaning": "stream_precleaning",
-    "odometer": "stream_odometer",
-    "health": "stream_health",
-    "target_soc": "stream_target_soc",
-    "amp_limit": "stream_amp_limit",
-    "charge_timer": "stream_charge_timer",
-    "software": "stream_software_info",
-    "ota_schedule": "stream_ota_schedule",
-    "climate_timers": "stream_climate_timers",
-    "climate_timer_settings": "stream_climate_timer_settings",
 }
+ACTIVE_ONLY_STREAMS: dict[str, str] = {
+    "climate": "stream_climate",
+    "location": "stream_location",
+}
+STREAM_METHODS: dict[str, str] = {**ALWAYS_ON_STREAMS, **ACTIVE_ONLY_STREAMS}
 
 _ATTR_FIELDS = {spec.name: spec for spec in fields(PolestarVehicleData)}
 
@@ -234,6 +238,7 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
         self._applied_generations: dict[str, int] = {}
         self._poll_count = 0
         self._last_unsupported_probe: float | None = None
+        self._active = False
 
     def next_fetch_generation(self) -> int:
         """Claim the next fetch sequence number.
@@ -277,6 +282,7 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
         self.data = replace(self.data, **fresh)
         if "software" in fresh:
             self._update_installed_version_cache(self.data.software)
+        self._async_update_activity()
         self.async_update_listeners()
 
     # ------------------------------------------------------------------
@@ -420,13 +426,16 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
         return entry.options.get(CONF_ENABLE_STREAMS, DEFAULT_ENABLE_STREAMS)
 
     async def async_start_streams(self) -> None:
-        """Start the optional live subscriptions, if enabled."""
-        if not self.streams_enabled or self._stream_tasks:
-            return
-        for attr, method_name in STREAM_METHODS.items():
-            if getattr(self.vehicle, method_name, None) is None:
-                continue
-            self._start_stream(attr)
+        """Start the live subscriptions the car's current state calls for."""
+        self.async_restart_finished_streams()
+
+    def _wanted_streams(self) -> tuple[str, ...]:
+        """Attributes that should have a running subscription right now."""
+        if not self.streams_enabled:
+            return ()
+        if self._active:
+            return tuple(STREAM_METHODS)
+        return tuple(ALWAYS_ON_STREAMS)
 
     def _start_stream(self, attr: str) -> None:
         method = getattr(self.vehicle, STREAM_METHODS[attr], None)
@@ -437,23 +446,63 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
             name=f"polestar-{self.vehicle.vin}-{attr}-stream",
         )
 
-    def async_restart_finished_streams(self) -> None:
-        """Restart subscriptions that ended, after a poll proved connectivity.
+    def _stop_stream(self, attr: str) -> None:
+        task = self._stream_tasks.pop(attr, None)
+        if task is not None and not task.done():
+            task.cancel()
 
-        No staleness heuristics: a stream that is merely quiet is
-        indistinguishable from a healthy idle one, and polling already
-        guarantees the data stays fresh, so only genuinely finished tasks are
-        restarted.
+    def async_restart_finished_streams(self) -> None:
+        """(Re)start wanted subscriptions that are not running.
+
+        Runs after a poll proved connectivity. No staleness heuristics: a
+        stream that is merely quiet is indistinguishable from a healthy idle
+        one, and polling already guarantees the data stays fresh, so only
+        genuinely finished tasks are restarted.
         """
-        if not self.streams_enabled:
-            return
-        for attr in STREAM_METHODS:
+        for attr in self._wanted_streams():
             if attr in self._unsupported_streams:
                 continue
             task = self._stream_tasks.get(attr)
             if task is not None and not task.done():
                 continue
             self._start_stream(attr)
+
+    # ------------------------------------------------------------------
+    # Activity
+    # ------------------------------------------------------------------
+
+    @property
+    def car_is_active(self) -> bool:
+        """Whether the car is doing something worth watching closely."""
+        data = self.data
+        battery = data.battery
+        if battery is not None and battery.charging_status == ChargingStatus.CHARGING:
+            return True
+        if self.climate_is_active:
+            return True
+        exterior = data.exterior
+        if exterior is not None and (
+            exterior.is_locked is False
+            or exterior.any_door_open
+            or _any_window_open(exterior)
+            or _tailgate_open(exterior)
+        ):
+            return True
+        availability = data.availability
+        return availability is not None and availability.usage_mode in _IN_USE_MODES
+
+    def _async_update_activity(self) -> None:
+        """Re-evaluate active/idle and start or stop the active-only streams."""
+        active = self.car_is_active
+        if active == self._active:
+            return
+        self._active = active
+        _LOGGER.debug("%s is now %s", self.vehicle.vin, "active" if active else "idle")
+        if active:
+            self.async_restart_finished_streams()
+        else:
+            for attr in ACTIVE_ONLY_STREAMS:
+                self._stop_stream(attr)
 
     async def _async_run_stream(
         self,
@@ -1024,6 +1073,24 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
         status = await self.vehicle.set_climate_timer_settings(settings)
         self._schedule_background_refresh("climate_timer_settings")
         return status
+
+
+def _any_window_open(exterior: ExteriorStatus) -> bool:
+    windows = exterior.windows
+    if windows is None:
+        return False
+    return any(
+        window is not None and window.open_status not in _CLOSED
+        for window in (
+            windows.front_left, windows.front_right, windows.rear_left, windows.rear_right
+        )
+    )
+
+
+def _tailgate_open(exterior: ExteriorStatus) -> bool:
+    tailgate = exterior.tailgate
+    status = tailgate.status if tailgate is not None else None
+    return status is not None and status.open_status not in _CLOSED
 
 
 @dataclass

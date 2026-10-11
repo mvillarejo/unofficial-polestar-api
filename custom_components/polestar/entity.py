@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
+from homeassistant.core import CALLBACK_TYPE, callback
 from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
@@ -31,18 +34,28 @@ class OptimisticStateMixin:
     ``_OPTIMISTIC_TTL``. Too short a TTL is what made a command look undone:
     the override expired, the entity fell back to the pre-command snapshot,
     and only a later poll put it back.
+
+    Expiry writes state itself. The coordinator only notifies entities when a
+    value changes, so if the car never reports back no update would ever come
+    along to re-render the entity, and the override would show forever.
     """
 
     _OPTIMISTIC_TTL = 30.0
     _optimistic_value: Any = None
     _optimistic_deadline: float = 0.0
+    _optimistic_expiry: CALLBACK_TYPE | None = None
 
     def _set_optimistic(self, value: Any) -> None:
         self._optimistic_value = value
         self._optimistic_deadline = time.monotonic() + self._OPTIMISTIC_TTL
+        self._cancel_optimistic_expiry()
+        self._optimistic_expiry = async_call_later(
+            self.hass, self._OPTIMISTIC_TTL, self._async_optimistic_expired
+        )
         self.async_write_ha_state()
 
     def _clear_optimistic(self) -> None:
+        self._cancel_optimistic_expiry()
         self._optimistic_value = None
         self._optimistic_deadline = 0.0
         self.async_write_ha_state()
@@ -51,10 +64,27 @@ class OptimisticStateMixin:
         if self._optimistic_deadline == 0.0:
             return real_value
         if real_value == self._optimistic_value or time.monotonic() >= self._optimistic_deadline:
+            self._cancel_optimistic_expiry()
             self._optimistic_deadline = 0.0
             self._optimistic_value = None
             return real_value
         return self._optimistic_value
+
+    @callback
+    def _async_optimistic_expired(self, _now: datetime) -> None:
+        self._optimistic_expiry = None
+        self._optimistic_value = None
+        self._optimistic_deadline = 0.0
+        self.async_write_ha_state()
+
+    def _cancel_optimistic_expiry(self) -> None:
+        if self._optimistic_expiry is not None:
+            self._optimistic_expiry()
+            self._optimistic_expiry = None
+
+    async def async_will_remove_from_hass(self) -> None:
+        self._cancel_optimistic_expiry()
+        await super().async_will_remove_from_hass()
 
 
 class PolestarEntity(CoordinatorEntity[PolestarCoordinator]):

@@ -231,7 +231,7 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
             name=f"Polestar {vehicle.vin}",
             update_interval=self.idle_interval,
             config_entry=entry,
-            always_update=True,
+            always_update=False,
         )
         self.vehicle = vehicle
         self.climate_preferences = ClimateCommandPreferences()
@@ -272,9 +272,18 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
         faster post-command refresh. Streams and other unsequenced callers
         claim a generation now, which correctly makes them newer than anything
         still in flight.
+
+        Entities are only notified when a value actually changed: a stream
+        replaying its snapshot on every resubscribe would otherwise rewrite
+        every entity's state each time.
         """
+        if self._apply_values(values, generation):
+            self.async_update_listeners()
+
+    def _apply_values(self, values: dict[str, Any], generation: int | None) -> bool:
+        """Merge values into the snapshot; return whether anything changed."""
         if not values:
-            return
+            return False
         if generation is None:
             generation = self.next_fetch_generation()
 
@@ -283,16 +292,19 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
             for attr, value in values.items()
             if generation > self._applied_generations.get(attr, 0)
         }
-        if not fresh:
-            return
         for attr in fresh:
             self._applied_generations[attr] = generation
+        changed = {
+            attr: value for attr, value in fresh.items() if getattr(self.data, attr) != value
+        }
 
-        self.data = replace(self.data, **fresh)
-        if "software" in fresh:
-            self._update_installed_version_cache(self.data.software)
-        self._async_update_activity()
-        self.async_update_listeners()
+        if changed:
+            self.data = replace(self.data, **changed)
+            if "software" in changed:
+                self._update_installed_version_cache(self.data.software)
+        if fresh:
+            self._async_update_activity()
+        return bool(changed)
 
     # ------------------------------------------------------------------
     # Fetching
@@ -375,7 +387,9 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
         )
         if successful == 0:
             raise UpdateFailed("All API calls failed")
-        self.async_apply_values(values, generation=generation)
+        # No notify here: with always_update=False the base class notifies
+        # entities itself when the returned snapshot differs from the last one.
+        self._apply_values(values, generation)
         self.async_restart_finished_streams()
         return self.data
 

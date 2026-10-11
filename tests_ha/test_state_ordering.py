@@ -14,6 +14,8 @@ regression-tested here:
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
+from datetime import timedelta
 from unittest.mock import AsyncMock
 
 from homeassistant.components.lock import DOMAIN as LOCK_DOMAIN
@@ -25,6 +27,8 @@ from homeassistant.const import (
     SERVICE_UNLOCK,
 )
 from homeassistant.core import HomeAssistant
+from homeassistant.util import dt as dt_util
+from pytest_homeassistant_custom_component.common import async_fire_time_changed
 
 from polestar_api.models.exterior import CentralLockStatus, ExteriorStatus, LockStatus
 
@@ -181,6 +185,82 @@ async def test_lock_releases_its_optimistic_value_once_the_car_agrees(
     coordinator.async_apply_values({"exterior": LOCKED})
     await hass.async_block_till_done()
     assert hass.states.get(f"lock.{PREFIX}_lock").state == "locked"
+
+
+async def test_optimistic_value_expires_without_any_coordinator_update(
+    hass: HomeAssistant, setup_integration, coordinator
+) -> None:
+    """The car never reports back, and nothing changes in the snapshot.
+
+    The coordinator only notifies entities on a real change, so no update
+    comes along to re-render the entity: the expiry itself has to.
+    """
+    from custom_components.polestar.lock import PolestarLock
+
+    coordinator.async_apply_values({"exterior": LOCKED})
+    await hass.async_block_till_done()
+
+    await _call(hass, LOCK_DOMAIN, SERVICE_UNLOCK, f"lock.{PREFIX}_lock")
+    assert hass.states.get(f"lock.{PREFIX}_lock").state == "unlocked"
+
+    # An identical snapshot (a stream replaying on resubscribe) is not a change.
+    coordinator.async_apply_values({"exterior": LOCKED})
+    await hass.async_block_till_done()
+    assert hass.states.get(f"lock.{PREFIX}_lock").state == "unlocked"
+
+    async_fire_time_changed(
+        hass, dt_util.utcnow() + timedelta(seconds=PolestarLock._OPTIMISTIC_TTL + 1)
+    )
+    await hass.async_block_till_done()
+
+    assert hass.states.get(f"lock.{PREFIX}_lock").state == "locked"
+
+
+async def test_removed_entity_leaves_no_expiry_timer_behind(
+    hass: HomeAssistant, setup_integration
+) -> None:
+    await _call(hass, LOCK_DOMAIN, SERVICE_LOCK, f"lock.{PREFIX}_lock")
+    lock = hass.data["entity_components"][LOCK_DOMAIN].get_entity(f"lock.{PREFIX}_lock")
+    assert lock._optimistic_expiry is not None
+
+    assert await hass.config_entries.async_unload(setup_integration.entry_id)
+    await hass.async_block_till_done()
+
+    assert lock._optimistic_expiry is None
+
+
+# ---------------------------------------------------------------------------
+# Notify only on change
+# ---------------------------------------------------------------------------
+
+
+async def test_unchanged_values_do_not_notify_entities(coordinator, battery) -> None:
+    calls: list[None] = []
+    unsub = coordinator.async_add_listener(lambda: calls.append(None))
+    try:
+        coordinator.async_apply_values({"battery": replace(battery)})
+        assert calls == []
+
+        coordinator.async_apply_values({"battery": replace(battery, charge_level=63)})
+        assert len(calls) == 1
+    finally:
+        unsub()
+
+
+async def test_poll_with_nothing_new_does_not_notify_entities(
+    coordinator, mock_vehicle, battery
+) -> None:
+    calls: list[None] = []
+    unsub = coordinator.async_add_listener(lambda: calls.append(None))
+    try:
+        await coordinator.async_refresh()
+        assert calls == []
+
+        mock_vehicle.get_battery.return_value = replace(battery, charge_level=63)
+        await coordinator.async_refresh()
+        assert len(calls) == 1
+    finally:
+        unsub()
 
 
 # ---------------------------------------------------------------------------

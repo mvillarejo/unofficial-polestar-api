@@ -9,7 +9,7 @@ detect.
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from homeassistant.core import HomeAssistant
@@ -19,6 +19,7 @@ from custom_components.polestar.const import (
     CONF_ENABLE_STREAMS,
     CONF_UPDATE_INTERVAL,
     DEFAULT_UPDATE_INTERVAL,
+    STREAM_MIN_RESUBSCRIBE_INTERVAL,
 )
 from custom_components.polestar.coordinator import STREAM_METHODS
 from polestar_api.models.battery import Battery, ChargingStatus
@@ -142,3 +143,41 @@ async def test_polling_still_runs_with_streams_enabled(
     await coordinator.async_refresh()
 
     streaming_vehicle.get_battery.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ("stream_lifetime", "expected_wait"),
+    [
+        (0.0, STREAM_MIN_RESUBSCRIBE_INTERVAL),
+        (STREAM_MIN_RESUBSCRIBE_INTERVAL / 3, STREAM_MIN_RESUBSCRIBE_INTERVAL * 2 / 3),
+        (120.0, None),
+    ],
+)
+async def test_resubscribe_after_clean_close_respects_the_floor(
+    coordinator, battery, stream_lifetime, expected_wait
+) -> None:
+    """A server closing after every message must not become a tight loop."""
+    clock = [1_000.0]
+    subscribes = 0
+
+    async def _stream():
+        nonlocal subscribes
+        subscribes += 1
+        if subscribes > 3:
+            raise asyncio.CancelledError
+        clock[0] += stream_lifetime
+        yield battery
+
+    sleep = AsyncMock()
+    with (
+        patch("custom_components.polestar.coordinator.monotonic", side_effect=lambda: clock[0]),
+        patch("custom_components.polestar.coordinator.asyncio.sleep", sleep),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await coordinator._async_run_stream("battery", _stream)
+
+    assert subscribes == 4
+    if expected_wait is None:
+        sleep.assert_not_called()
+    else:
+        assert [c.args[0] for c in sleep.await_args_list] == pytest.approx([expected_wait] * 3)

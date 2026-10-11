@@ -30,6 +30,7 @@ MAX_UPDATE_INTERVAL = 1800
 CONF_ENABLE_STREAMS = "enable_streams"
 DEFAULT_ENABLE_STREAMS = True
 STREAM_RETRY_DELAY = 30  # seconds (initial, doubles each retry)
+STREAM_MIN_RESUBSCRIBE_INTERVAL = 30  # seconds between subscribes after a clean close
 STREAM_MAX_RETRIES = 10
 
 # Used when neither the user nor the car has supplied a climate target.

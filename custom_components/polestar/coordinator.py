@@ -67,6 +67,7 @@ from .const import (
     MAX_UPDATE_INTERVAL,
     MIN_UPDATE_INTERVAL,
     STREAM_MAX_RETRIES,
+    STREAM_MIN_RESUBSCRIBE_INTERVAL,
     STREAM_RETRY_DELAY,
 )
 from .utils import local_utc_offset_minutes
@@ -462,6 +463,7 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
         """Run one long-lived subscription and merge updates into the snapshot."""
         consecutive_failures = 0
         while True:
+            subscribed_at = monotonic()
             try:
                 received = False
                 async for value in stream_factory():
@@ -472,7 +474,12 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
                         self.async_apply_values({attr: merged})
                 if received:
                     # Server closed a subscription after delivering data (normal
-                    # GOAWAY behaviour) — resubscribe straight away.
+                    # GOAWAY behaviour) — resubscribe, but never sooner than the
+                    # floor after the last subscribe, so a server that closes
+                    # after every message cannot turn this into a request loop.
+                    wait = STREAM_MIN_RESUBSCRIBE_INTERVAL - (monotonic() - subscribed_at)
+                    if wait > 0:
+                        await asyncio.sleep(wait)
                     continue
                 consecutive_failures += 1
                 delay = self._stream_retry_delay(

@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
 from .. import grpc as grpc_call
+from .. import unknown_fields
 from ..codec import decode, encode
 from ..models.health import Health
 
@@ -49,7 +50,9 @@ class HealthServiceClient:
             return None
         raw = decode(data, _RESPONSE_SCHEMA)
         if raw.get("health"):
-            return Health.from_bytes(raw["health"])
+            health = Health.from_bytes(raw["health"])
+            unknown_fields.record_message("health", Health, raw["health"])
+            return health
         return None
 
     async def stream(self) -> AsyncIterator[Health]:
@@ -63,4 +66,6 @@ class HealthServiceClient:
         ):
             raw = decode(data, _RESPONSE_SCHEMA)
             if raw.get("health"):
-                yield Health.from_bytes(raw["health"])
+                health = Health.from_bytes(raw["health"])
+                unknown_fields.record_message("health", Health, raw["health"])
+                yield health

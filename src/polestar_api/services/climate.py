@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from .. import grpc as grpc_call
+from .. import unknown_fields
 from ..codec import decode
 from ..models.climate import (
     ACTIVE_RUNNING_STATUSES,
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
     from ..connection import GrpcConnection
 
 _RESPONSE_SCHEMA = {3: ("climate", "message")}
+_DIGITAL_TWIN_FIELDS = frozenset({1, 2, 3, *range(6, 17)})
 
 
 class ClimateServiceClient:
@@ -151,8 +153,12 @@ class ClimateServiceClient:
             climate_bytes = raw["climate"]
             payload = decode(climate_bytes)
             if isinstance(payload.get(1), bytes):
-                return cls._parse_digital_twin(climate_bytes)
-            return ClimatizationInfo.from_bytes(climate_bytes)
+                info = cls._parse_digital_twin(climate_bytes)
+                unknown_fields.record_fields("climate", payload, _DIGITAL_TWIN_FIELDS)
+                return info
+            info = ClimatizationInfo.from_bytes(climate_bytes)
+            unknown_fields.record_message("climate_legacy", ClimatizationInfo, climate_bytes)
+            return info
         return None
 
     async def get_latest(self) -> ClimatizationInfo | None:

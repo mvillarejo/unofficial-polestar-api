@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
 from .. import grpc as grpc_call
+from .. import unknown_fields
 from ..codec import decode, encode
 from ..models.common import Coordinate, Location, Timestamp
 
@@ -37,17 +38,31 @@ def _parse_compact_location(data: bytes) -> Location:
     )
 
 
+def _record_unknown(raw: dict, known: set[int], nested_field: int | None = None) -> None:
+    unknown_fields.record_fields("location", raw, known, coarse=True)
+    if nested_field is not None:
+        unknown_fields.record_fields(
+            "location", raw[nested_field], {1, 2, 3},
+            prefix=f"{nested_field}.", coarse=True,
+        )
+
+
 def _parse_location_message(data: bytes) -> Location:
     raw = decode(data)
 
     nested_location = raw.get(5)
     if isinstance(nested_location, bytes):
-        return _parse_compact_location(nested_location)
+        location = _parse_compact_location(nested_location)
+        _record_unknown(raw, {5}, 5)
+        return location
 
     nested_location = raw.get(2)
     if isinstance(nested_location, bytes):
-        return _parse_compact_location(nested_location)
+        location = _parse_compact_location(nested_location)
+        _record_unknown(raw, {2}, 2)
+        return location
 
+    _record_unknown(raw, {2, 3, 4})
     longitude = raw.get(2)
     latitude = raw.get(3)
     timestamp = raw.get(4)

@@ -8,9 +8,20 @@ from typing import TYPE_CHECKING
 from ..models.battery import Battery, GetBatteryResponse
 from ..models.common import VehicleRequest
 from .. import grpc as grpc_call
+from .. import unknown_fields
+from ..codec import decode
 
 if TYPE_CHECKING:
     from ..connection import GrpcConnection
+
+_RESPONSE_SCHEMA = {3: ("battery", "message")}
+
+
+def _record_unknown(response_data: bytes) -> None:
+    unknown_fields.record_message(
+        "battery", Battery, decode(response_data, _RESPONSE_SCHEMA).get("battery")
+    )
+
 
 class BatteryServiceClient:
     """Battery service wrapper."""
@@ -35,6 +46,7 @@ class BatteryServiceClient:
             metadata=metadata,
         )
         response = GetBatteryResponse.from_bytes(response_data)
+        _record_unknown(response_data)
         return response.battery
 
     async def stream(self) -> AsyncIterator[Battery]:
@@ -49,5 +61,6 @@ class BatteryServiceClient:
             metadata=metadata,
         ):
             response = GetBatteryResponse.from_bytes(response_data)
+            _record_unknown(response_data)
             if response.battery:
                 yield response.battery

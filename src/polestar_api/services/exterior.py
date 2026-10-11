@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
 from .. import grpc as grpc_call
+from .. import unknown_fields
 from ..codec import decode
 from ..models.common import VehicleRequest
 from ..models.exterior import (
@@ -27,6 +28,7 @@ if TYPE_CHECKING:
     from ..connection import GrpcConnection
 
 _RESPONSE_SCHEMA = {3: ("exterior", "message")}
+_DIGITAL_TWIN_FIELDS = frozenset({*range(2, 15), 16})
 
 
 class ExteriorServiceClient:
@@ -99,8 +101,10 @@ class ExteriorServiceClient:
         payload = decode(exterior_bytes)
         if cls._is_digital_twin(payload):
             status = cls._parse_digital_twin(exterior_bytes)
+            unknown_fields.record_fields("exterior", payload, _DIGITAL_TWIN_FIELDS)
         else:
             status = ExteriorStatus.from_bytes(exterior_bytes)
+            unknown_fields.record_message("exterior_legacy", ExteriorStatus, exterior_bytes)
         return status if status.has_data else None
 
     async def get_latest(self) -> ExteriorStatus | None:

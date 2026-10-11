@@ -7,8 +7,9 @@ entity methods, so the entity wiring is exercised too.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from homeassistant.components.button import DOMAIN as BUTTON_DOMAIN, SERVICE_PRESS
@@ -29,10 +30,16 @@ from homeassistant.const import (
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 
+from custom_components.polestar.coordinator import (
+    _POST_COMMAND_REFRESH_DELAYS,
+    _STREAMED_POST_COMMAND_REFRESH_DELAYS,
+)
+from polestar_api.models.battery import Battery, ChargingStatus
 from polestar_api.models.charging import (
     ChargeTargetLevelSettingType,
     TargetSocResponse,
 )
+from polestar_api.models.exterior import CentralLockStatus, ExteriorStatus, LockStatus
 
 PREFIX = "polestar_4_test123"
 
@@ -211,3 +218,99 @@ async def test_target_soc_refuses_in_preset_mode(
     with pytest.raises(HomeAssistantError, match="daily"):
         await coordinator.async_set_target_soc(90)
     mock_vehicle.set_target_soc.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Post-command refresh: stop once the car has reported back
+# ---------------------------------------------------------------------------
+
+_LOCKED = ExteriorStatus(central_lock=CentralLockStatus(lock_status=LockStatus.LOCKED))
+
+
+async def _run_post_command_refresh(coordinator, *attrs: str, on_sleep=None) -> list[float]:
+    """Run the refresh schedule with sleeps short-circuited; return the delays."""
+    delays: list[float] = []
+
+    async def _sleep(delay: float) -> None:
+        delays.append(delay)
+        if on_sleep is not None:
+            on_sleep(len(delays))
+
+    with patch("custom_components.polestar.coordinator.asyncio.sleep", _sleep):
+        await coordinator.async_refresh_after_command(*attrs)
+    return delays
+
+
+async def test_post_command_refresh_stops_once_the_value_changes(
+    coordinator, mock_vehicle
+) -> None:
+    mock_vehicle.get_exterior.reset_mock()
+    mock_vehicle.get_exterior.side_effect = [ExteriorStatus(), _LOCKED, _LOCKED, _LOCKED]
+
+    delays = await _run_post_command_refresh(coordinator, "exterior")
+
+    assert mock_vehicle.get_exterior.await_count == 2
+    assert delays == list(_POST_COMMAND_REFRESH_DELAYS[:2])
+    assert coordinator.data.exterior.is_locked
+
+
+async def test_post_command_refresh_runs_the_full_schedule_without_a_change(
+    coordinator, mock_vehicle
+) -> None:
+    mock_vehicle.get_exterior.reset_mock()
+
+    delays = await _run_post_command_refresh(coordinator, "exterior")
+
+    assert delays == list(_POST_COMMAND_REFRESH_DELAYS)
+    assert mock_vehicle.get_exterior.await_count == len(_POST_COMMAND_REFRESH_DELAYS)
+
+
+async def test_post_command_refresh_skips_the_call_when_a_stream_confirmed_first(
+    coordinator, mock_vehicle
+) -> None:
+    mock_vehicle.get_exterior.reset_mock()
+
+    def _stream_pushes(step: int) -> None:
+        if step == 1:
+            coordinator.async_apply_values({"exterior": _LOCKED})
+
+    delays = await _run_post_command_refresh(coordinator, "exterior", on_sleep=_stream_pushes)
+
+    assert delays == [_POST_COMMAND_REFRESH_DELAYS[0]]
+    mock_vehicle.get_exterior.assert_not_awaited()
+
+
+async def test_streamed_attr_only_gets_the_late_fallback_refreshes(
+    coordinator, mock_vehicle
+) -> None:
+    """A running stream reports the change itself; skip the early steps."""
+    blocker = asyncio.Event()
+    coordinator._stream_tasks["exterior"] = asyncio.create_task(blocker.wait())
+    try:
+        mock_vehicle.get_exterior.reset_mock()
+        delays = await _run_post_command_refresh(coordinator, "exterior")
+    finally:
+        coordinator._stream_tasks.pop("exterior").cancel()
+
+    assert delays == list(_STREAMED_POST_COMMAND_REFRESH_DELAYS)
+    assert mock_vehicle.get_exterior.await_count == len(_STREAMED_POST_COMMAND_REFRESH_DELAYS)
+
+
+async def test_partly_streamed_command_keeps_the_full_schedule(coordinator) -> None:
+    blocker = asyncio.Event()
+    coordinator._stream_tasks["exterior"] = asyncio.create_task(blocker.wait())
+    try:
+        delays = await _run_post_command_refresh(coordinator, "exterior", "software")
+    finally:
+        coordinator._stream_tasks.pop("exterior").cancel()
+
+    assert delays == list(_POST_COMMAND_REFRESH_DELAYS)
+
+
+async def test_a_command_marks_the_car_active(hass: HomeAssistant, coordinator) -> None:
+    coordinator.async_apply_values({"battery": Battery(charging_status=ChargingStatus.IDLE)})
+    assert coordinator.mode == "idle"
+
+    await _call(hass, SWITCH_DOMAIN, SERVICE_TURN_ON, f"switch.{PREFIX}_climate")
+
+    assert coordinator.mode == "active"

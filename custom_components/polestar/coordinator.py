@@ -90,6 +90,9 @@ _LOGGER = logging.getLogger(__name__)
 # pre-command snapshot before the car had reported anything, which is what made
 # a command look like it had been silently undone.
 _POST_COMMAND_REFRESH_DELAYS: tuple[int, ...] = (3, 5, 10, 15, 30, 60)
+# When a running stream already covers the attribute it reports the change
+# within seconds on its own, so the refreshes are only a fallback.
+_STREAMED_POST_COMMAND_REFRESH_DELAYS: tuple[int, ...] = (10, 60)
 # Endpoints that answered UNIMPLEMENTED are skipped on scheduled polls, but
 # re-probed this often (seconds) in case the backend starts serving them again.
 # Elapsed time rather than a poll count, so it holds if the poll interval changes.
@@ -452,6 +455,10 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
             name=f"polestar-{self.vehicle.vin}-{attr}-stream",
         )
 
+    def _stream_running(self, attr: str) -> bool:
+        task = self._stream_tasks.get(attr)
+        return task is not None and not task.done()
+
     def _stop_stream(self, attr: str) -> None:
         task = self._stream_tasks.pop(attr, None)
         if task is not None and not task.done():
@@ -466,10 +473,7 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
         genuinely finished tasks are restarted.
         """
         for attr in self._wanted_streams():
-            if attr in self._unsupported_streams:
-                continue
-            task = self._stream_tasks.get(attr)
-            if task is not None and not task.done():
+            if attr in self._unsupported_streams or self._stream_running(attr):
                 continue
             self._start_stream(attr)
 
@@ -731,10 +735,27 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
         self._schedule_background_refresh("exterior")
 
     async def async_refresh_after_command(self, *attrs: str) -> None:
-        """Refresh after a command, allowing backend state to settle first."""
+        """Refresh after a command, allowing backend state to settle first.
+
+        Stops as soon as any of the attributes differs from what it was when
+        the command was issued — the car has reported back, by this refresh or
+        by a stream in the meantime. If nothing changes, the whole schedule
+        runs as the fallback.
+        """
         refresh_attrs = tuple(dict.fromkeys(attrs))
-        for delay in _POST_COMMAND_REFRESH_DELAYS:
+        before = {attr: getattr(self.data, attr) for attr in refresh_attrs}
+
+        def _confirmed() -> bool:
+            return any(getattr(self.data, attr) != value for attr, value in before.items())
+
+        if refresh_attrs and all(self._stream_running(attr) for attr in refresh_attrs):
+            delays = _STREAMED_POST_COMMAND_REFRESH_DELAYS
+        else:
+            delays = _POST_COMMAND_REFRESH_DELAYS
+        for delay in delays:
             await asyncio.sleep(delay)
+            if _confirmed():
+                return
             try:
                 await self.async_request_attrs_refresh(*refresh_attrs)
             except Exception as err:  # noqa: BLE001
@@ -744,6 +765,8 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
                     ",".join(refresh_attrs) if refresh_attrs else "full",
                     err,
                 )
+            if _confirmed():
+                return
 
     # ------------------------------------------------------------------
     # Climate

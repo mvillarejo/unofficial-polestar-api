@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections import Counter
+
 import pytest
 from grpclib.const import Status
 from grpclib.exceptions import GRPCError, StreamTerminatedError
@@ -76,6 +78,27 @@ class TestUnaryUnary:
         with pytest.raises(GRPCError):
             await grpc_call.unary_unary(channel, METHOD, b"")
         assert channel.attempts == 1
+
+
+class TestCallCounts:
+    @pytest.fixture(autouse=True)
+    def fresh_counts(self, monkeypatch):
+        monkeypatch.setattr(grpc_call, "CALL_COUNTS", Counter())
+
+    async def test_every_attempt_is_counted_per_method(self):
+        await grpc_call.unary_unary(_FakeChannel(RESET, b"ok"), METHOD, b"")
+        await grpc_call.unary_unary(_FakeChannel(b"ok"), "/other/Method", b"")
+        await _collect(_FakeChannel([RESET], [b"a"]))
+
+        assert grpc_call.CALL_COUNTS == {METHOD: 4, "/other/Method": 1}
+
+    async def test_failed_calls_are_counted(self):
+        with pytest.raises(GRPCError):
+            await grpc_call.unary_unary(
+                _FakeChannel(GRPCError(Status.UNIMPLEMENTED, "nope")), METHOD, b""
+            )
+
+        assert grpc_call.CALL_COUNTS == {METHOD: 1}
 
 
 class TestUnaryStream:

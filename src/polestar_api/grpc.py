@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import time
+from collections import Counter
 from collections.abc import AsyncIterator
 
 from grpclib.client import Channel
@@ -16,6 +18,10 @@ _LOGGER = logging.getLogger(__name__)
 
 # Transient gRPC statuses worth retrying (matches app's RetryPolicy).
 _RETRIABLE_STATUSES = {Status.UNAVAILABLE, Status.INTERNAL}
+
+# Every call attempt (retries included) per gRPC method, since import.
+CALL_COUNTS: Counter[str] = Counter()
+CALL_COUNTS_SINCE = time.time()
 
 
 def _retry_delay(attempt: int) -> float:
@@ -54,6 +60,7 @@ async def unary_unary(
             delay = _retry_delay(attempt)
             _LOGGER.debug("Retry %d/%d for %s after %.1fs", attempt, retries, method, delay)
             await asyncio.sleep(delay)
+        CALL_COUNTS[method] += 1
         try:
             async with channel.request(
                 method,
@@ -98,6 +105,7 @@ async def unary_stream(
             _LOGGER.debug("Retry %d/%d for %s after %.1fs", attempt, retries, method, delay)
             await asyncio.sleep(delay)
         yielded = False
+        CALL_COUNTS[method] += 1
         try:
             async with channel.request(
                 method,

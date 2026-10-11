@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import fields, is_dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
 from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.core import HomeAssistant
+
+from polestar_api import grpc as grpc_call
 
 from .const import CONF_VIN
 from .coordinator import (
@@ -80,6 +83,18 @@ def _poll_diagnostics(coordinator: PolestarCoordinator) -> dict[str, Any]:
     }
 
 
+def _api_call_diagnostics() -> dict[str, Any]:
+    """Report gRPC call attempts per method since the library was loaded."""
+    total = sum(grpc_call.CALL_COUNTS.values())
+    elapsed = max(time.time() - grpc_call.CALL_COUNTS_SINCE, 1.0)
+    return {
+        "total": total,
+        "per_method": dict(sorted(grpc_call.CALL_COUNTS.items())),
+        "since": datetime.fromtimestamp(grpc_call.CALL_COUNTS_SINCE, UTC).isoformat(),
+        "per_day_rate": round(total * 86400 / elapsed, 1),
+    }
+
+
 def _coordinator_diagnostics(coordinator: PolestarCoordinator) -> dict[str, Any]:
     """Dump one vehicle's coordinator state."""
     return {
@@ -106,6 +121,7 @@ async def async_get_config_entry_diagnostics(
         "entry_data": async_redact_data(dict(entry.data), TO_REDACT),
         "entry_options": async_redact_data(dict(entry.options), TO_REDACT),
         "demo_mode": data.api is None,
+        "api_calls": _api_call_diagnostics(),
         "vehicles": [
             _coordinator_diagnostics(coordinator)
             for coordinator in data.coordinators.values()

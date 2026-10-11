@@ -53,16 +53,16 @@ def _parse_location_message(data: bytes) -> Location:
     nested_location = raw.get(5)
     if isinstance(nested_location, bytes):
         location = _parse_compact_location(nested_location)
-        _record_unknown(raw, {5}, 5)
+        _record_unknown(raw, {1, 2, 3, 4, 5}, 5)
         return location
 
     nested_location = raw.get(2)
     if isinstance(nested_location, bytes):
         location = _parse_compact_location(nested_location)
-        _record_unknown(raw, {2}, 2)
+        _record_unknown(raw, {1, 2}, 2)
         return location
 
-    _record_unknown(raw, {2, 3, 4})
+    _record_unknown(raw, {1, 2, 3, 4})
     longitude = raw.get(2)
     latitude = raw.get(3)
     timestamp = raw.get(4)

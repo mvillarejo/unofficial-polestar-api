@@ -8,7 +8,13 @@ import pytest
 from polestar_api import grpc as grpc_call
 from polestar_api import unknown_fields
 from polestar_api.backend import BackendProfile
-from polestar_api.codec import encode_double, encode_int32, encode_message, encode_string
+from polestar_api.codec import (
+    encode_double,
+    encode_int32,
+    encode_int64,
+    encode_message,
+    encode_string,
+)
 from polestar_api.models.battery import Battery, ChargingStatus, GetBatteryResponse
 from polestar_api.models.climate import ClimatizationInfo
 from polestar_api.models.common import Timestamp
@@ -293,6 +299,22 @@ class TestLocationFeed:
         assert await client.get_last_known() == baseline
         assert list(_snapshot()) == ["location:8"]
         assert _values("location:8") == [271.0]
+
+    async def test_p4_message_with_top_level_coordinates_records_nothing(self, reply):
+        """The P4 sends the VIN, a top-level copy of the coordinates and a
+        millisecond timestamp alongside the compact location at field 5."""
+        client = LocationServiceClient(_connection(), FAKE_ID)
+        reply.data = (
+            encode_string(1, FAKE_ID)
+            + encode_double(2, 18.123456)
+            + encode_double(3, 59.654321)
+            + encode_int64(4, SECONDS * 1000)
+            + encode_message(5, self.COMPACT)
+        )
+
+        await client.get_last_known()
+
+        assert _snapshot() == {}
 
     async def test_coordinates_never_reach_the_record(self, reply):
         client = LocationServiceClient(_connection(), FAKE_ID)

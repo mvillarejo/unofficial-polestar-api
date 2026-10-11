@@ -25,7 +25,7 @@ from custom_components.polestar.coordinator import (
     STREAM_METHODS,
     PolestarVehicleData,
 )
-from polestar_api.exceptions import AuthError
+from polestar_api.exceptions import AuthCooldownError, AuthError
 from polestar_api.models.odometer import OdometerStatus
 
 
@@ -112,6 +112,25 @@ async def test_auth_failure_starts_reauth(
     assert any(flow["context"]["source"] == SOURCE_REAUTH for flow in flows)
 
 
+async def test_reauth_cooldown_is_transient_not_a_reauth(
+    hass: HomeAssistant, setup_integration, coordinator, mock_vehicle
+) -> None:
+    """A login that failed on a network blip must not lock the user out.
+
+    During the re-login cooldown calls fail fast; that has to read as a
+    transient fetch failure that heals itself, not as rejected credentials.
+    """
+    for method in _FETCH_ATTRS.values():
+        getattr(mock_vehicle, method).side_effect = AuthCooldownError("cooldown")
+
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert not coordinator.last_update_success
+    flows = hass.config_entries.flow.async_progress()
+    assert not any(flow["context"]["source"] == SOURCE_REAUTH for flow in flows)
+
+
 # ---------------------------------------------------------------------------
 # UNIMPLEMENTED handling
 # ---------------------------------------------------------------------------
@@ -162,6 +181,21 @@ async def test_unsupported_endpoint_is_reprobed_once_a_day(
     mock_vehicle.get_health.assert_called_once()
     assert coordinator.data.health == "healthy"
     assert "health" not in coordinator._unsupported_fetches
+
+
+async def test_post_command_refresh_skips_unsupported_endpoints(
+    hass: HomeAssistant, coordinator, mock_vehicle
+) -> None:
+    """A command's follow-up refreshes must not re-call an UNIMPLEMENTED endpoint."""
+    mock_vehicle.get_amp_limit.side_effect = GRPCError(GrpcStatus.UNIMPLEMENTED, "nope")
+    await coordinator.async_refresh()
+    assert "amp_limit" in coordinator._unsupported_fetches
+
+    mock_vehicle.get_amp_limit.reset_mock()
+    await coordinator.async_request_attrs_refresh("amp_limit", "battery")
+
+    mock_vehicle.get_amp_limit.assert_not_called()
+    mock_vehicle.get_battery.assert_called()
 
 
 # ---------------------------------------------------------------------------

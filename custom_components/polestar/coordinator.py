@@ -379,7 +379,7 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
             await self.async_request_refresh()
             return
         generation = self.next_fetch_generation()
-        values, successful, _ = await self.async_fetch_values(attrs)
+        values, successful, _ = await self.async_fetch_values(attrs, probe_unsupported=False)
         if successful:
             self.async_apply_values(values, generation=generation)
 

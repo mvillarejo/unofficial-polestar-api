@@ -67,7 +67,7 @@ While the car is idle the integration polls the Polestar cloud every **30 minute
 2. Click **Configure** on your vehicle entry
 3. Set the **Polling interval** (in seconds, minimum 60, maximum 3600)
 
-While the car is active (charging, climate on, unlocked, a door or window open, in use, or within 5 minutes of a command) it polls every 10 minutes with live updates on, or every 2 minutes with them off, and never less often than the interval you set. With live updates on, battery and lock/door/window changes stream within seconds, and climate and location stream too while the car is active.
+While the car is active (charging, climate on, unlocked, a door or window open, in use, or within 5 minutes of a command) it polls every 10 minutes with live updates on, or every 2 minutes with them off, and never less often than the interval you set. With live updates on, battery, lock/door/window and climate changes stream within seconds, and location streams too while the car is active.
 
 Lower values give faster updates but may increase server load and 12v battery drain. Existing entries keep the interval they already had; raising an old 300 or 600 to the new default cuts the daily request count substantially.
 

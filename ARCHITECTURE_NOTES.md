@@ -69,8 +69,11 @@ not re-render entities.
 
 | Stream | Runs |
 |---|---|
-| `battery`, `exterior` | whenever streams are enabled |
-| `climate`, `location` | only while the car is active; cancelled when it goes idle |
+| `battery`, `exterior`, `climate` | whenever streams are enabled |
+| `location` | only while the car is active; cancelled when it goes idle |
+
+Climate is always on so that climate started from the app or a departure timer
+is seen while the car is parked, which automations rely on.
 | everything else | not streamed, poll only |
 
 Resubscribes after a clean close wait at least 30s from the previous subscribe
@@ -97,9 +100,9 @@ calls a day and are left out.
 |---|---|---|---|
 | Before: 15 streams + 300s poll | 288 x 15 = 4,320 | 15 x 720 = 10,800 | ~15,100 |
 | Before: streams off, 300s poll | 288 x 15 = 4,320 | 0 | ~4,300 |
-| Now, defaults, 3h active + 21h idle, streams on | (18 + 42) x 15 = 900 | 2 x 720 + 2 x 30 x 3 = 1,620 | ~2,500 |
+| Now, defaults, 3h active + 21h idle, streams on | (18 + 42) x 15 = 900 | 3 x 720 + 30 x 3 = 2,250 | ~3,150 |
 | Now, defaults, 3h active + 21h idle, streams off | (90 + 42) x 15 = 1,980 | 0 | ~2,000 |
-| Now, streams on, option left at 300s | 288 x 15 = 4,320 | 1,620 | ~5,900 |
+| Now, streams on, option left at 300s | 288 x 15 = 4,320 | 2,250 | ~6,600 |
 
 The daily re-probe of unsupported endpoints adds 6. The last row is why an
 entry still set to a short interval should be raised: with streams on the idle

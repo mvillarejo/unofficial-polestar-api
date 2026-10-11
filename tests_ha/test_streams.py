@@ -2,7 +2,7 @@
 
 Streams are the responsiveness mechanism for the few attributes worth their
 price (the server closes each one after ~120s, so an open stream costs ~720
-calls a day). Battery and exterior stream whenever streams are on; climate and
+calls a day). Battery, exterior and climate stream whenever streams are on;
 location only while the car is active. The poll is still the freshness
 guarantee underneath them — a dead stream is a non-event that the next poll
 quietly recovers from, rather than something a watchdog has to detect.
@@ -120,8 +120,8 @@ async def idle_streaming_setup(
 
 def test_only_the_valuable_attrs_stream() -> None:
     """Every open stream costs ~720 calls a day, so the set stays small."""
-    assert set(ALWAYS_ON_STREAMS) == {"battery", "exterior"}
-    assert set(ACTIVE_ONLY_STREAMS) == {"climate", "location"}
+    assert set(ALWAYS_ON_STREAMS) == {"battery", "exterior", "climate"}
+    assert set(ACTIVE_ONLY_STREAMS) == {"location"}
     assert set(STREAM_METHODS) == set(ALWAYS_ON_STREAMS) | set(ACTIVE_ONLY_STREAMS)
 
 
@@ -145,20 +145,20 @@ async def test_idle_car_streams_only_the_always_on_attrs(
 async def test_active_only_streams_follow_the_car_state(
     idle_streaming_setup, hass: HomeAssistant, streaming_vehicle
 ) -> None:
-    """An unlock pushed over the exterior stream wakes climate/location up;
-    locking again puts them back to sleep."""
+    """An unlock pushed over the exterior stream wakes location up; locking
+    again puts it back to sleep."""
     coordinator = next(iter(idle_streaming_setup.runtime_data.coordinators.values()))
 
     await streaming_vehicle.stream_updates["exterior"].put(UNLOCKED)
     await hass.async_block_till_done()
     assert _running(coordinator) == set(STREAM_METHODS)
-    climate_task = coordinator._stream_tasks["climate"]
+    location_task = coordinator._stream_tasks["location"]
 
     await streaming_vehicle.stream_updates["exterior"].put(LOCKED)
     await hass.async_block_till_done()
     assert set(coordinator._stream_tasks) == set(ALWAYS_ON_STREAMS)
-    await asyncio.gather(climate_task, return_exceptions=True)
-    assert climate_task.cancelled()
+    await asyncio.gather(location_task, return_exceptions=True)
+    assert location_task.cancelled()
 
 
 async def test_poll_does_not_restart_active_only_streams_while_idle(
@@ -181,8 +181,8 @@ async def test_diagnostics_list_every_stream_with_its_policy(
     assert streams["battery"] == {
         "policy": "always_on", "started": True, "running": True, "supported": True
     }
-    assert streams["climate"]["policy"] == "active_only"
-    assert not streams["climate"]["started"]
+    assert streams["location"]["policy"] == "active_only"
+    assert not streams["location"]["started"]
 
 
 async def test_stream_value_reaches_entity_state(

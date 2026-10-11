@@ -189,15 +189,16 @@ _FETCH_ATTRS: dict[str, str] = {
 # closes every subscription cleanly after ~120s and replays the latest snapshot
 # on resubscribe, so each stream that is kept open costs ~720 calls a day
 # whether or not anything changed. Only what is worth that price streams; every
-# other attribute is poll-only. Battery/charging and locks/doors/windows stream
-# whenever streams are enabled; climate and location only while the car is
-# active (see PolestarCoordinator.car_is_active).
+# other attribute is poll-only. Battery/charging, locks/doors/windows and
+# climate stream whenever streams are enabled, so climate started from the app
+# or a departure timer shows up while the car is parked; location only while
+# the car is active (see PolestarCoordinator.car_is_active).
 ALWAYS_ON_STREAMS: dict[str, str] = {
     "battery": "stream_battery",
     "exterior": "stream_exterior",
+    "climate": "stream_climate",
 }
 ACTIVE_ONLY_STREAMS: dict[str, str] = {
-    "climate": "stream_climate",
     "location": "stream_location",
 }
 STREAM_METHODS: dict[str, str] = {**ALWAYS_ON_STREAMS, **ACTIVE_ONLY_STREAMS}

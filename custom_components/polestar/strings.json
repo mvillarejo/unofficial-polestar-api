@@ -8,7 +8,7 @@
         },
         "data_description": {
           "update_interval": "How often every attribute is polled while the car is idle (60-3600 seconds, default 1800). While it is active (charging, climate on, unlocked, a door or window open, in use, or within 5 minutes of a command) it is polled every 10 minutes with live updates on, or every 2 minutes without them, never less often than this value. Lower means fresher data but more requests to Polestar's servers and more 12V battery use.",
-          "enable_streams": "Keeps live subscriptions open for battery/charging and locks/doors/windows, plus climate and location while the car is active, so those changes appear within seconds instead of on the next poll. Each open subscription costs about 720 requests a day. On by default; turn off if persistent subscriptions prove unreliable for your car or account."
+          "enable_streams": "Keeps live subscriptions open for battery/charging, locks/doors/windows and climate, plus location while the car is active, so those changes appear within seconds instead of on the next poll. Each open subscription costs about 720 requests a day. On by default; turn off if persistent subscriptions prove unreliable for your car or account."
         },
         "description": "Live updates are on by default and layered on top of the poll below, which stays the underlying freshness guarantee. The poll runs slowly while the car is idle and faster while it is active."
       }
@@ -43,7 +43,7 @@
       },
       "guest_vin": {
         "title": "Enter VIN manually",
-        "description": "No vehicles were found on this account. This is normal for secondary users and guests. Enter the VIN of the vehicle you have access to.\n\nBattery and door/lock status are updated live via streaming, and climate and location too while the car is active. Everything else (odometer, tyre health, charging settings, charge locations, climate timers, weather, OTA updates) is polled: at the polling interval while the car is idle, more often while it is active.",
+        "description": "No vehicles were found on this account. This is normal for secondary users and guests. Enter the VIN of the vehicle you have access to.\n\nBattery, door/lock and climate status are updated live via streaming, and location too while the car is active. Everything else (odometer, tyre health, charging settings, charge locations, climate timers, weather, OTA updates) is polled: at the polling interval while the car is idle, more often while it is active.",
         "data": {
           "vin": "VIN (Vehicle Identification Number)",
           "update_interval": "Polling interval (seconds)"

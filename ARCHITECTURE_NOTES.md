@@ -92,7 +92,8 @@ steps run. With no change the whole schedule runs as the fallback.
 
 ## Call budget (estimate)
 
-Assumptions: 21 polled endpoints, 6 of them `UNIMPLEMENTED` on the P4, so 15
+Assumptions: 21 polled endpoints, 6 of them not served on the P4 (4 answer
+`UNIMPLEMENTED`, the 2 charge-location reads `INVALID_ARGUMENT`), so 15
 calls per poll. One stream subscription per 120s. Commands add a handful of
 calls a day and are left out.
 

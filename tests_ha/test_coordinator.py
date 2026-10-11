@@ -25,6 +25,7 @@ from custom_components.polestar.const import (
 )
 from custom_components.polestar.coordinator import (
     _FETCH_ATTRS,
+    _INVALID_ARGUMENT_UNSUPPORTED_AFTER,
     _UNSUPPORTED_REPROBE_INTERVAL,
     STREAM_METHODS,
     PolestarVehicleData,
@@ -209,6 +210,44 @@ async def test_unsupported_endpoint_is_reprobed_once_a_day(
     mock_vehicle.get_health.assert_called_once()
     assert coordinator.data.health == "healthy"
     assert "health" not in coordinator._unsupported_fetches
+
+
+async def test_repeated_invalid_argument_marks_the_endpoint_unsupported(
+    hass: HomeAssistant, coordinator, mock_vehicle
+) -> None:
+    """The P4 rejects charge-location reads with INVALID_ARGUMENT every time;
+    after a few in a row they are skipped like UNIMPLEMENTED, not retried and
+    logged on every poll."""
+    mock_vehicle.get_charge_locations.side_effect = GRPCError(
+        GrpcStatus.INVALID_ARGUMENT, "Validation failed"
+    )
+    for _ in range(_INVALID_ARGUMENT_UNSUPPORTED_AFTER - 1):
+        await coordinator.async_refresh()
+        assert "charge_locations" not in coordinator._unsupported_fetches
+
+    await coordinator.async_refresh()
+    assert "charge_locations" in coordinator._unsupported_fetches
+    assert coordinator.data.charge_locations == []
+
+    mock_vehicle.get_charge_locations.reset_mock()
+    await coordinator.async_refresh()
+    mock_vehicle.get_charge_locations.assert_not_called()
+
+
+async def test_a_success_resets_the_invalid_argument_count(
+    hass: HomeAssistant, coordinator, mock_vehicle
+) -> None:
+    """Only consecutive INVALID_ARGUMENTs count; one transient error never
+    takes an endpoint off the poll."""
+    error = GRPCError(GrpcStatus.INVALID_ARGUMENT, "Validation failed")
+    for _ in range(3):
+        mock_vehicle.get_charge_locations.side_effect = error
+        for _ in range(_INVALID_ARGUMENT_UNSUPPORTED_AFTER - 1):
+            await coordinator.async_refresh()
+        mock_vehicle.get_charge_locations.side_effect = None
+        await coordinator.async_refresh()
+
+    assert "charge_locations" not in coordinator._unsupported_fetches
 
 
 async def test_post_command_refresh_skips_unsupported_endpoints(

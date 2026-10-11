@@ -97,6 +97,10 @@ _STREAMED_POST_COMMAND_REFRESH_DELAYS: tuple[int, ...] = (10, 60)
 # re-probed this often (seconds) in case the backend starts serving them again.
 # Elapsed time rather than a poll count, so it holds if the poll interval changes.
 _UNSUPPORTED_REPROBE_INTERVAL = 24 * 60 * 60
+# The P4 answers charge-location reads with INVALID_ARGUMENT on every call.
+# One such answer can be a transient backend hiccup, so only this many in a row
+# mark the endpoint unsupported like UNIMPLEMENTED does.
+_INVALID_ARGUMENT_UNSUPPORTED_AFTER = 3
 _FETCH_TIMEOUT = 15
 _COMMAND_INVOCATION_SUCCESS = {
     InvocationStatus.SENT,
@@ -243,6 +247,7 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
         self._unsupported_streams: set[str] = set()
         self._unsupported_commands: set[str] = set()
         self._unsupported_fetches: set[str] = set()
+        self._invalid_argument_counts: dict[str, int] = {}
         self._generation = 0
         self._applied_generations: dict[str, int] = {}
         self._poll_count = 0
@@ -322,8 +327,10 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
         Returns the values that should be applied, how many calls succeeded and
         how many were actually attempted. Attributes whose call failed are
         simply absent from the result, so the previous value is kept — except
-        for UNIMPLEMENTED, which clears the attribute to its default rather
-        than pinning its entities to a pre-breakage snapshot forever.
+        for UNIMPLEMENTED (or INVALID_ARGUMENT repeated
+        ``_INVALID_ARGUMENT_UNSUPPORTED_AFTER`` times), which clears the
+        attribute to its default rather than pinning its entities to a
+        pre-breakage snapshot forever.
         """
         requested = tuple(dict.fromkeys(attrs))
         values: dict[str, Any] = {}
@@ -351,7 +358,7 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
             if isinstance(result, (AuthError, TokenExpiredError)):
                 raise ConfigEntryAuthFailed(str(result)) from result
 
-            if isinstance(result, GRPCError) and result.status is GrpcStatus.UNIMPLEMENTED:
+            if self._fetch_is_unsupported(attr, result):
                 if attr not in self._unsupported_fetches:
                     self._unsupported_fetches.add(attr)
                     _LOGGER.info(
@@ -367,6 +374,7 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
                 )
                 continue
 
+            self._invalid_argument_counts.pop(attr, None)
             if attr in self._unsupported_fetches:
                 self._unsupported_fetches.discard(attr)
                 _LOGGER.info("Fetch %s is supported again for %s", attr, self.vehicle.vin)
@@ -377,6 +385,18 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
             successful += 1
 
         return values, successful, len(attr_names)
+
+    def _fetch_is_unsupported(self, attr: str, result: Any) -> bool:
+        """Whether a failed fetch means the backend does not serve this endpoint."""
+        if not isinstance(result, GRPCError):
+            return False
+        if result.status is GrpcStatus.UNIMPLEMENTED:
+            return True
+        if result.status is not GrpcStatus.INVALID_ARGUMENT:
+            return False
+        count = self._invalid_argument_counts.get(attr, 0) + 1
+        self._invalid_argument_counts[attr] = count
+        return count >= _INVALID_ARGUMENT_UNSUPPORTED_AFTER or attr in self._unsupported_fetches
 
     async def _async_update_data(self) -> PolestarVehicleData:
         """Poll every attribute together on the coordinator's own timer."""

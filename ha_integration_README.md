@@ -24,9 +24,9 @@ Then add the integration via **Settings → Devices & Services → Add Integrati
 | Credentials | **Password** | Yes | The password of your Polestar account. |
 | Credentials | **Demo mode** | No (default off) | Create a fake vehicle with sample data instead of connecting to Polestar. |
 | Select your vehicle | **Vehicle** | Yes | The car to add, picked from the ones found on the account. Pick the last option if your car is missing. |
-| Select your vehicle | **Polling interval** | No (default 600) | Seconds between polls of the data that is not pushed live, 60–86400. |
+| Select your vehicle | **Polling interval** | No (default 1800) | Seconds between polls while the car is idle, 60–3600. |
 | Enter VIN manually | **VIN** | Yes | The 17-character VIN of the vehicle you have access to. Shown when the account lists no vehicles, or when you pick "My vehicle is not listed". |
-| Enter VIN manually | **Polling interval** | No (default 600) | Seconds between polls of the data that is not pushed live, 60–86400. |
+| Enter VIN manually | **Polling interval** | No (default 1800) | Seconds between polls while the car is idle, 60–3600. |
 | Demo vehicle VIN | **VIN** | Yes | Any 17-character identifier for the fake demo vehicle. Shown only in demo mode. |
 
 The vehicle picker and the manual VIN step are alternatives — you see one or the other, never both. Re-authentication later asks for the **Password** only. The polling interval is the only setting you can change after setup, under [Update interval](#update-interval).
@@ -61,13 +61,15 @@ Entity IDs are generated from the vehicle model and registration. For example, a
 
 ## Update interval
 
-The integration polls the Polestar cloud for updates every **10 minutes** by default. To change this:
+While the car is idle the integration polls the Polestar cloud every **30 minutes** by default. To change this:
 
 1. Go to **Settings → Devices & Services → Polestar**
 2. Click **Configure** on your vehicle entry
-3. Set the **Polling interval** (in seconds, minimum 60, maximum 86400)
+3. Set the **Polling interval** (in seconds, minimum 60, maximum 3600)
 
-Lower values give faster updates but may increase server load and 12v battery drain. In addition to polling, the integration keeps long-lived streams open for real-time updates (battery, location, door status, etc.), so polling mainly covers data that isn't streamed.
+While the car is active (charging, climate on, unlocked, a door or window open, in use, or within 5 minutes of a command) it polls every 10 minutes with live updates on, or every 2 minutes with them off, and never less often than the interval you set. With live updates on, battery and lock/door/window changes stream within seconds, and climate and location stream too while the car is active.
+
+Lower values give faster updates but may increase server load and 12v battery drain. Existing entries keep the interval they already had; raising an old 300 or 600 to the new default cuts the daily request count substantially.
 
 ## Services
 

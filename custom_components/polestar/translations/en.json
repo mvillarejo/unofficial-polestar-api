@@ -7,10 +7,10 @@
           "enable_streams": "Enable live updates"
         },
         "data_description": {
-          "update_interval": "How often every attribute is polled together (60-1800 seconds). Lower means fresher data but more requests to Polestar's servers and more 12V battery use.",
-          "enable_streams": "Keeps live subscriptions open for most attributes so changes appear within seconds instead of on the next poll. On by default; turn off if persistent subscriptions prove unreliable for your car or account."
+          "update_interval": "How often every attribute is polled while the car is idle (60-3600 seconds, default 1800). While it is active (charging, climate on, unlocked, a door or window open, in use, or within 5 minutes of a command) it is polled every 10 minutes with live updates on, or every 2 minutes without them, never less often than this value. Lower means fresher data but more requests to Polestar's servers and more 12V battery use.",
+          "enable_streams": "Keeps live subscriptions open for battery/charging and locks/doors/windows, plus climate and location while the car is active, so those changes appear within seconds instead of on the next poll. Each open subscription costs about 720 requests a day. On by default; turn off if persistent subscriptions prove unreliable for your car or account."
         },
-        "description": "Live updates are on by default and layered on top of the poll below, which stays the underlying freshness guarantee."
+        "description": "Live updates are on by default and layered on top of the poll below, which stays the underlying freshness guarantee. The poll runs slowly while the car is idle and faster while it is active."
       }
     }
   },
@@ -38,19 +38,19 @@
         },
         "data_description": {
           "vin": "The vehicle to add. Pick the last option if your car is missing.",
-          "update_interval": "How often to poll the Polestar cloud for the data that is not pushed live (60-86400 seconds)."
+          "update_interval": "How often to poll the Polestar cloud while the car is idle (60-3600 seconds). It is polled more often while the car is active."
         }
       },
       "guest_vin": {
         "title": "Enter VIN manually",
-        "description": "No vehicles were found on this account. This is normal for secondary users and guests. Enter the VIN of the vehicle you have access to.\n\nBattery, location, climate, and door/lock status are updated in real-time via streaming. The polling interval controls how often other data is fetched: odometer, tyre health, charging settings, charge locations, climate timers, weather, and OTA updates.",
+        "description": "No vehicles were found on this account. This is normal for secondary users and guests. Enter the VIN of the vehicle you have access to.\n\nBattery and door/lock status are updated live via streaming, and climate and location too while the car is active. Everything else (odometer, tyre health, charging settings, charge locations, climate timers, weather, OTA updates) is polled: at the polling interval while the car is idle, more often while it is active.",
         "data": {
           "vin": "VIN (Vehicle Identification Number)",
           "update_interval": "Polling interval (seconds)"
         },
         "data_description": {
           "vin": "The 17-character VIN of the vehicle you have access to.",
-          "update_interval": "How often to poll the Polestar cloud for the data that is not pushed live (60-86400 seconds)."
+          "update_interval": "How often to poll the Polestar cloud while the car is idle (60-3600 seconds). It is polled more often while the car is active."
         }
       },
       "demo_vin": {

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from grpclib.const import Status as GrpcStatus
@@ -14,6 +14,10 @@ from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import async_fire_time_changed
 
 from custom_components.polestar.const import (
+    ACTIVE_UPDATE_INTERVAL_POLLING,
+    ACTIVE_UPDATE_INTERVAL_STREAMING,
+    COMMAND_ACTIVE_WINDOW,
+    CONF_ENABLE_STREAMS,
     CONF_UPDATE_INTERVAL,
     DEFAULT_UPDATE_INTERVAL,
     MAX_UPDATE_INTERVAL,
@@ -25,8 +29,25 @@ from custom_components.polestar.coordinator import (
     STREAM_METHODS,
     PolestarVehicleData,
 )
+from custom_components.polestar.diagnostics import async_get_config_entry_diagnostics
 from polestar_api.exceptions import AuthCooldownError, AuthError
+from polestar_api.models.availability import Availability, UsageMode
+from polestar_api.models.battery import Battery, ChargingStatus
+from polestar_api.models.exterior import (
+    CentralLockStatus,
+    DoorsStatus,
+    DoorStatus,
+    ExteriorStatus,
+    LockStatus,
+    OpenStatus,
+    TailgateStatus,
+    WindowsStatus,
+    WindowStatus,
+)
 from polestar_api.models.odometer import OdometerStatus
+
+IDLE_BATTERY = Battery(charge_level=62, charging_status=ChargingStatus.IDLE, range_km=310)
+LOCKED = ExteriorStatus(central_lock=CentralLockStatus(lock_status=LockStatus.LOCKED))
 
 
 # ---------------------------------------------------------------------------
@@ -54,8 +75,15 @@ def test_streamable_attrs_are_also_polled() -> None:
     ],
 )
 async def test_update_interval_is_clamped(
-    hass: HomeAssistant, mock_config_entry, mock_api, configured: int, expected: int
+    hass: HomeAssistant,
+    mock_config_entry,
+    mock_api,
+    mock_vehicle,
+    configured: int,
+    expected: int,
 ) -> None:
+    """The option is the idle interval, so assert it on an idle car."""
+    mock_vehicle.get_battery.return_value = IDLE_BATTERY
     mock_config_entry.add_to_hass(hass)
     hass.config_entries.async_update_entry(
         mock_config_entry, options={CONF_UPDATE_INTERVAL: configured}
@@ -230,3 +258,167 @@ async def test_coordinator_keeps_polling_on_its_timer(
     await hass.async_block_till_done()
 
     assert mock_vehicle.get_battery.called
+
+
+# ---------------------------------------------------------------------------
+# Active / idle
+# ---------------------------------------------------------------------------
+
+
+async def _setup(hass: HomeAssistant, entry, api, **options):
+    entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(entry, options=options)
+    with patch("custom_components.polestar.PolestarApi", return_value=api):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+    return next(iter(entry.runtime_data.coordinators.values()))
+
+
+@pytest.fixture
+async def idle_coordinator(hass: HomeAssistant, mock_config_entry, mock_api, mock_vehicle):
+    """A coordinator for a parked, locked car that is not charging."""
+    mock_vehicle.get_battery.return_value = IDLE_BATTERY
+    mock_vehicle.get_exterior.return_value = LOCKED
+    return await _setup(
+        hass, mock_config_entry, mock_api, **{CONF_UPDATE_INTERVAL: DEFAULT_UPDATE_INTERVAL}
+    )
+
+
+def _door(status: OpenStatus) -> ExteriorStatus:
+    return ExteriorStatus(
+        central_lock=CentralLockStatus(lock_status=LockStatus.LOCKED),
+        doors=DoorsStatus(rear_left=DoorStatus(open_status=status)),
+    )
+
+
+@pytest.mark.parametrize(
+    ("values", "active"),
+    [
+        ({}, False),
+        ({"battery": Battery(charging_status=ChargingStatus.CHARGING)}, True),
+        ({"battery": Battery(charging_status=ChargingStatus.SMART_CHARGING_PAUSED)}, False),
+        ({"battery": Battery(charging_status=ChargingStatus.DONE)}, False),
+        ({"climate": "climate_on"}, True),
+        ({"exterior": ExteriorStatus(
+            central_lock=CentralLockStatus(lock_status=LockStatus.UNLOCKED)
+        )}, True),
+        ({"exterior": ExteriorStatus()}, False),
+        ({"exterior": _door(OpenStatus.OPEN)}, True),
+        ({"exterior": _door(OpenStatus.AJAR)}, True),
+        ({"exterior": _door(OpenStatus.CLOSED)}, False),
+        ({"exterior": ExteriorStatus(
+            windows=WindowsStatus(front_right=WindowStatus(open_status=OpenStatus.AJAR))
+        )}, True),
+        ({"exterior": ExteriorStatus(
+            tailgate=TailgateStatus(status=DoorStatus(open_status=OpenStatus.OPEN))
+        )}, True),
+        ({"availability": Availability(usage_mode=UsageMode.DRIVING)}, True),
+        ({"availability": Availability(usage_mode=UsageMode.ACTIVE)}, True),
+        ({"availability": Availability(usage_mode=UsageMode.CONVENIENCE)}, True),
+        ({"availability": Availability(usage_mode=UsageMode.ENGINE_ON)}, True),
+        ({"availability": Availability(usage_mode=UsageMode.INACTIVE)}, False),
+        ({"availability": Availability(usage_mode=UsageMode.ENGINE_OFF)}, False),
+    ],
+)
+async def test_activity_rules(idle_coordinator, request, values, active) -> None:
+    if values.get("climate") == "climate_on":
+        values = {"climate": request.getfixturevalue("climate_on")}
+    assert idle_coordinator.mode == "idle"
+
+    idle_coordinator.async_apply_values(values)
+
+    assert idle_coordinator.car_is_active is active
+    assert idle_coordinator.mode == ("active" if active else "idle")
+
+
+async def test_interval_follows_the_mode(idle_coordinator, battery) -> None:
+    assert idle_coordinator.update_interval == timedelta(seconds=DEFAULT_UPDATE_INTERVAL)
+
+    idle_coordinator.async_apply_values({"battery": battery})
+    assert idle_coordinator.update_interval == timedelta(
+        seconds=ACTIVE_UPDATE_INTERVAL_STREAMING
+    )
+
+    idle_coordinator.async_apply_values({"battery": IDLE_BATTERY})
+    assert idle_coordinator.update_interval == timedelta(seconds=DEFAULT_UPDATE_INTERVAL)
+
+
+@pytest.mark.parametrize(
+    ("options", "expected_active"),
+    [
+        ({CONF_ENABLE_STREAMS: True}, ACTIVE_UPDATE_INTERVAL_STREAMING),
+        ({CONF_ENABLE_STREAMS: False}, ACTIVE_UPDATE_INTERVAL_POLLING),
+        # Never slower when active than the user asked for when idle.
+        ({CONF_ENABLE_STREAMS: True, CONF_UPDATE_INTERVAL: 300}, 300),
+    ],
+)
+async def test_active_interval(
+    hass: HomeAssistant, mock_config_entry, mock_api, mock_vehicle, options, expected_active
+) -> None:
+    mock_vehicle.get_battery.return_value = Battery(charging_status=ChargingStatus.CHARGING)
+    coordinator = await _setup(hass, mock_config_entry, mock_api, **options)
+
+    assert coordinator.mode == "active"
+    assert coordinator.update_interval == timedelta(seconds=expected_active)
+
+
+async def test_a_command_makes_the_car_active_for_a_while(idle_coordinator) -> None:
+    clock = [5_000.0]
+    with patch(
+        "custom_components.polestar.coordinator.monotonic", side_effect=lambda: clock[0]
+    ):
+        await idle_coordinator.async_run_command(AsyncMock(return_value=None))
+        assert idle_coordinator.mode == "active"
+
+        clock[0] += COMMAND_ACTIVE_WINDOW - 1
+        idle_coordinator.async_apply_values({"battery": IDLE_BATTERY})
+        assert idle_coordinator.mode == "active"
+
+        clock[0] += 2
+        idle_coordinator.async_apply_values({"battery": IDLE_BATTERY})
+        assert idle_coordinator.mode == "idle"
+
+
+async def test_waking_up_pulls_the_next_poll_in(
+    hass: HomeAssistant, idle_coordinator, mock_vehicle, battery
+) -> None:
+    """An unlock/charge seen between polls must not wait out the idle timer."""
+    mock_vehicle.get_battery.reset_mock()
+    idle_coordinator.async_apply_values({"battery": battery})
+
+    async_fire_time_changed(
+        hass, dt_util.utcnow() + timedelta(seconds=ACTIVE_UPDATE_INTERVAL_STREAMING + 1)
+    )
+    await hass.async_block_till_done()
+
+    mock_vehicle.get_battery.assert_called()
+
+
+async def test_idle_car_waits_for_the_idle_interval(
+    hass: HomeAssistant, idle_coordinator, mock_vehicle
+) -> None:
+    mock_vehicle.get_battery.reset_mock()
+
+    async_fire_time_changed(
+        hass, dt_util.utcnow() + timedelta(seconds=ACTIVE_UPDATE_INTERVAL_STREAMING + 1)
+    )
+    await hass.async_block_till_done()
+    mock_vehicle.get_battery.assert_not_called()
+
+    async_fire_time_changed(
+        hass, dt_util.utcnow() + timedelta(seconds=DEFAULT_UPDATE_INTERVAL + 1)
+    )
+    await hass.async_block_till_done()
+    mock_vehicle.get_battery.assert_called()
+
+
+async def test_diagnostics_report_mode_and_interval(
+    hass: HomeAssistant, mock_config_entry, idle_coordinator
+) -> None:
+    diag = await async_get_config_entry_diagnostics(hass, mock_config_entry)
+
+    poll = diag["vehicles"][0]["poll"]
+    assert poll["mode"] == "idle"
+    assert poll["interval_seconds"] == DEFAULT_UPDATE_INTERVAL
+    assert poll["idle_interval_seconds"] == DEFAULT_UPDATE_INTERVAL
+    assert poll["active_interval_seconds"] == ACTIVE_UPDATE_INTERVAL_STREAMING

@@ -2,11 +2,12 @@
 
 ``PolestarCoordinator`` owns the single ``PolestarVehicleData`` snapshot,
 every remote command, and the entity listener bus. It polls every attribute
-in ``_FETCH_ATTRS`` together on one timer (``CONF_UPDATE_INTERVAL``,
-default 10 minutes), and layers always-on persistent gRPC subscriptions
-(``STREAM_METHODS``) on top as the responsiveness mechanism — the poll is
-the freshness guarantee, streams are what make most attributes update within
-seconds rather than minutes.
+in ``_FETCH_ATTRS`` together on one timer whose interval adapts to the car:
+``CONF_UPDATE_INTERVAL`` (default 30 minutes) while it is idle, a short
+constant while it is active (see ``car_is_active``). A few persistent gRPC
+subscriptions (``STREAM_METHODS``) sit on top as the responsiveness
+mechanism — the poll is the freshness guarantee, streams are what make
+battery, locks, climate and location update within seconds.
 
 Entities subscribe to the coordinator directly, so they see the complete
 snapshot regardless of whether a given attribute last changed via the poll
@@ -59,6 +60,9 @@ from polestar_api.models.precleaning import PreCleaningInfo
 from polestar_api.models.weather import WeatherReport
 
 from .const import (
+    ACTIVE_UPDATE_INTERVAL_POLLING,
+    ACTIVE_UPDATE_INTERVAL_STREAMING,
+    COMMAND_ACTIVE_WINDOW,
     CONF_ENABLE_STREAMS,
     CONF_UPDATE_INTERVAL,
     DEFAULT_CLIMATE_TEMPERATURE,
@@ -217,11 +221,12 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
     ) -> None:
         base = entry.options.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL)
         base = max(MIN_UPDATE_INTERVAL, min(base, MAX_UPDATE_INTERVAL))
+        self.idle_interval = timedelta(seconds=base)
         super().__init__(
             hass,
             _LOGGER,
             name=f"Polestar {vehicle.vin}",
-            update_interval=timedelta(seconds=base),
+            update_interval=self.idle_interval,
             config_entry=entry,
             always_update=True,
         )
@@ -239,6 +244,7 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
         self._poll_count = 0
         self._last_unsupported_probe: float | None = None
         self._active = False
+        self._last_command_at: float | None = None
 
     def next_fetch_generation(self) -> int:
         """Claim the next fetch sequence number.
@@ -489,16 +495,55 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
         ):
             return True
         availability = data.availability
-        return availability is not None and availability.usage_mode in _IN_USE_MODES
+        if availability is not None and availability.usage_mode in _IN_USE_MODES:
+            return True
+        last = self._last_command_at
+        return last is not None and monotonic() - last < COMMAND_ACTIVE_WINDOW
+
+    @property
+    def active_interval(self) -> timedelta:
+        """Poll interval while the car is active."""
+        seconds = (
+            ACTIVE_UPDATE_INTERVAL_STREAMING
+            if self.streams_enabled
+            else ACTIVE_UPDATE_INTERVAL_POLLING
+        )
+        return min(timedelta(seconds=seconds), self.idle_interval)
+
+    @property
+    def mode(self) -> str:
+        """``"active"`` or ``"idle"``, as last evaluated."""
+        return "active" if self._active else "idle"
+
+    def async_note_command(self) -> None:
+        """Record that a command was sent; the car counts as active for a while."""
+        self._last_command_at = monotonic()
+        self._async_update_activity()
 
     def _async_update_activity(self) -> None:
-        """Re-evaluate active/idle and start or stop the active-only streams."""
+        """Re-evaluate active/idle after new data or a command.
+
+        Switches the poll interval and starts or stops the active-only
+        streams. On idle -> active the pending idle timer is pulled in, so a
+        car that was just unlocked is not left waiting out a 30-minute poll.
+        """
         active = self.car_is_active
         if active == self._active:
             return
         self._active = active
-        _LOGGER.debug("%s is now %s", self.vehicle.vin, "active" if active else "idle")
+        self.update_interval = self.active_interval if active else self.idle_interval
+        _LOGGER.debug(
+            "%s is now %s, polling every %s",
+            self.vehicle.vin, self.mode, self.update_interval,
+        )
         if active:
+            # A poll in flight has no timer pending and schedules the next one
+            # from update_interval when it finishes. Otherwise reschedule now:
+            # async_request_refresh would spend a full poll on it, and
+            # async_set_updated_data would force last_update_success and
+            # re-render every entity.
+            if self._unsub_refresh is not None:
+                self._schedule_refresh()
             self.async_restart_finished_streams()
         else:
             for attr in ACTIVE_ONLY_STREAMS:
@@ -649,6 +694,7 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
         capability: str | None = None,
     ) -> Any:
         """Run a remote command and validate its response."""
+        self.async_note_command()
         try:
             response = await asyncio.wait_for(command(), timeout=timeout)
         except TimeoutError:
@@ -670,6 +716,7 @@ class PolestarCoordinator(DataUpdateCoordinator[PolestarVehicleData]):
 
     def _schedule_background_refresh(self, *attrs: str) -> None:
         """Kick off a background refresh for the given attributes."""
+        self.async_note_command()
         entry = self.config_entry
         assert entry is not None
         label = ",".join(attrs) if attrs else "full"

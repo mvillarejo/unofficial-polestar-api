@@ -18,11 +18,20 @@ PLATFORMS = [
     "update",
 ]
 
-# How often the single coordinator polls every attribute together.
+# How often the single coordinator polls every attribute together while the
+# car is idle (parked, locked, not charging, climate off).
 CONF_UPDATE_INTERVAL = "update_interval"
-DEFAULT_UPDATE_INTERVAL = 600  # seconds
+DEFAULT_UPDATE_INTERVAL = 1800  # seconds
 MIN_UPDATE_INTERVAL = 60
-MAX_UPDATE_INTERVAL = 1800
+MAX_UPDATE_INTERVAL = 3600
+
+# Poll interval while the car is active. With streams on they carry the live
+# data and the poll only backs them up; without streams the poll is all there
+# is. Never slower than the idle interval the user chose.
+ACTIVE_UPDATE_INTERVAL_STREAMING = 600  # seconds
+ACTIVE_UPDATE_INTERVAL_POLLING = 120  # seconds
+# A command keeps the car "active" for this long after it was sent.
+COMMAND_ACTIVE_WINDOW = 300  # seconds
 
 # Live gRPC subscriptions are the primary responsiveness mechanism, on top of
 # the slower poll timer above. On by default; can still be turned off from

@@ -77,13 +77,16 @@ def _stream_diagnostics(coordinator: PolestarCoordinator) -> dict[str, Any]:
 
 
 def _poll_diagnostics(coordinator: PolestarCoordinator) -> dict[str, Any]:
-    """Report the coordinator's poll interval and progress."""
+    """Report the coordinator's poll interval, mode and progress."""
     return {
+        "mode": coordinator.mode,
         "interval_seconds": (
             coordinator.update_interval.total_seconds()
             if coordinator.update_interval is not None
             else None
         ),
+        "idle_interval_seconds": coordinator.idle_interval.total_seconds(),
+        "active_interval_seconds": coordinator.active_interval.total_seconds(),
         "poll_count": coordinator._poll_count,
         "last_update_success": coordinator.last_update_success,
     }
